@@ -1,0 +1,19 @@
+# Build context hygiene: the image only needs the Go sources.
+.git
+.github
+data
+secrets
+dist
+build
+runtime
+auths
+.bps-local
+docs
+scripts
+*.exe
+*.log
+*.md
+*.test
+*.out
+Dockerfile
+docker-compose.yml

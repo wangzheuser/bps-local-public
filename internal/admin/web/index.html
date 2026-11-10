@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bps-server 管理控制台</title>
+<link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 登录视图 -->
+  <section id="view-login" class="login-wrap hidden">
+    <form id="login-form" class="login-card">
+      <h1>bps-server</h1>
+      <p class="muted">管理控制台</p>
+      <label for="login-password">管理员密码</label>
+      <input id="login-password" type="password" autocomplete="current-password" required>
+      <button type="submit" class="btn primary">登录</button>
+      <p id="login-error" class="error hidden"></p>
+    </form>
+  </section>
+
+  <!-- 主界面 -->
+  <div id="view-main" class="hidden">
+    <header class="topbar">
+      <span class="brand">bps-server 管理控制台</span>
+      <nav id="nav">
+        <button data-view="overview" class="nav-btn active">总览</button>
+        <button data-view="accounts" class="nav-btn">账号</button>
+        <button data-view="keys" class="nav-btn">API Key</button>
+        <button data-view="usage" class="nav-btn">用量</button>
+        <button data-view="settings" class="nav-btn">设置</button>
+      </nav>
+      <button id="logout-btn" class="btn subtle">退出登录</button>
+    </header>
+
+    <main>
+      <section id="page-overview" class="page">
+        <h2>总览</h2>
+        <div id="overview-cards" class="cards"></div>
+        <p id="overview-error" class="error hidden"></p>
+      </section>
+
+      <section id="page-accounts" class="page hidden">
+        <div class="page-head">
+          <h2>账号</h2>
+          <button id="add-account-btn" class="btn primary">新增账号</button>
+        </div>
+        <p class="muted">新增账号后需完成设备授权：页面会给出官方授权地址与用户码，请在浏览器完成授权。</p>
+        <table id="accounts-table" class="data-table">
+          <thead>
+            <tr>
+              <th>名称</th><th>上游账号</th><th>套餐</th><th>状态</th>
+              <th>权重</th><th>在途</th><th>Token 有效期</th><th>最近错误</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p id="accounts-error" class="error hidden"></p>
+      </section>
+
+      <section id="page-keys" class="page hidden">
+        <div class="page-head">
+          <h2>API Key</h2>
+          <button id="add-key-btn" class="btn primary">创建 Key</button>
+        </div>
+        <p class="muted">完整 Key 仅在创建时显示一次，请立即保存。</p>
+        <table id="keys-table" class="data-table">
+          <thead>
+            <tr>
+              <th>名称</th><th>Key</th><th>状态</th><th>最后使用</th><th>过期时间</th><th>创建时间</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p id="keys-error" class="error hidden"></p>
+      </section>
+
+      <section id="page-usage" class="page hidden">
+        <h2>用量统计</h2>
+        <div class="filters">
+          <label>从 <input id="f-from" type="datetime-local"></label>
+          <label>至 <input id="f-to" type="datetime-local"></label>
+          <label>账号 <select id="f-account"><option value="">全部</option></select></label>
+          <label>Key <select id="f-key"><option value="">全部</option></select></label>
+          <label>模型 <input id="f-model" type="text" placeholder="gpt-6-astra"></label>
+          <label>分组
+            <select id="f-group">
+              <option value="day">按天</option>
+              <option value="account">按账号</option>
+              <option value="api_key">按 Key</option>
+              <option value="model">按模型</option>
+            </select>
+          </label>
+          <button id="f-apply" class="btn primary">查询</button>
+        </div>
+        <div id="usage-summary" class="cards"></div>
+        <h3>最近请求</h3>
+        <table id="usage-table" class="data-table">
+          <thead>
+            <tr>
+              <th>时间</th><th>模型</th><th>账号</th><th>Key</th><th>结果</th>
+              <th>输入</th><th>输出</th><th>缓存</th><th>推理</th><th>耗时</th><th>错误</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="pager">
+          <button id="usage-prev" class="btn subtle">上一页</button>
+          <span id="usage-page-info" class="muted"></span>
+          <button id="usage-next" class="btn subtle">下一页</button>
+        </div>
+        <p id="usage-error" class="error hidden"></p>
+      </section>
+
+      <section id="page-settings" class="page hidden">
+        <h2>网络代理</h2>
+        <p class="muted">所有调用上游（BPS 生成与账号设备授权）的请求都会经过此代理。留空表示直连。保存后立即生效，无需重启。</p>
+        <div class="settings-card">
+          <label class="form-row">
+            <span>代理地址</span>
+            <input id="proxy-input" type="text" placeholder="http://127.0.0.1:7890（留空为直连）" autocomplete="off" spellcheck="false">
+            <span class="hint">支持 http、https、socks5、socks5h；可带 user:pass@ 认证</span>
+          </label>
+          <div class="proxy-actions">
+            <button id="proxy-check-btn" class="btn">检测代理</button>
+            <button id="proxy-save-btn" class="btn primary">保存并立即生效</button>
+            <span id="proxy-current" class="muted"></span>
+          </div>
+          <div id="proxy-result" class="proxy-result hidden"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- 通用对话框 -->
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div id="modal" class="modal"></div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script src="/admin/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+# Managed multi-account bridge, single instance by design (SQLite + in-memory
+# scheduler state are not shared across replicas).
+services:
+  bps-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      BPS_DATA_DIR: /data
+      BPS_API_ADDR: 0.0.0.0:8790
+      BPS_ADMIN_ADDR: 0.0.0.0:8791
+      BPS_LOCAL_PROXY: ${BPS_LOCAL_PROXY:-}
+      BPS_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      BPS_COOKIE_SECURE: "false"
+      BPS_USAGE_RETENTION_DAYS: ${BPS_USAGE_RETENTION_DAYS:-30}
+    secrets:
+      - admin_password
+    volumes:
+      - bps-data:/data
+    ports:
+      # Host ports bind to loopback only; remote access requires a TLS reverse
+      # proxy plus BPS_COOKIE_SECURE=true.
+      - "127.0.0.1:8790:8790"
+      - "127.0.0.1:8791:8791"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8790/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+secrets:
+  admin_password:
+    file: ./secrets/admin_password
+
+volumes:
+  bps-data:

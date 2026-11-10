@@ -22,6 +22,13 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/sanitize"
 )
 
+// RequestMetadata carries the non-sensitive request fields the managed server
+// needs for usage instrumentation. It never contains prompt content.
+type RequestMetadata struct {
+	Model           string
+	ReasoningEffort string
+}
+
 // Config describes how the front end reaches the upstream gateway.
 type Config struct {
 	ImageRelay *basispoints.ImageRelay
@@ -44,6 +51,10 @@ type Config struct {
 	ProxyURL string
 	// Verbose logs each request line, never prompt content or tokens.
 	Verbose bool
+	// RequestMetadataSink optionally receives the parsed model and reasoning
+	// effort after the request body is read. The standalone CLI leaves it nil
+	// and behavior is unchanged.
+	RequestMetadataSink func(ctx context.Context, meta RequestMetadata)
 }
 
 // CredentialSource supplies an isolated credential snapshot.
@@ -161,6 +172,9 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	if s.cfg.Verbose {
 		log.Printf("incoming: %s", summarizeRequest(raw))
+	}
+	if s.cfg.RequestMetadataSink != nil {
+		s.cfg.RequestMetadataSink(r.Context(), requestMetadataFromRaw(raw))
 	}
 	if s.cfg.ARCTextSession && !arcTextOnly(raw) {
 		s.fail(w, http.StatusBadRequest, "arc_text_only", "ARC text sessions support messages only, with no client tools")
@@ -336,6 +350,24 @@ func summarizeRequest(raw []byte) string {
 	return fmt.Sprintf("fields=%v %s", keys, strings.Join(notes, " "))
 }
 
+// requestMetadataFromRaw extracts only the model and reasoning effort fields.
+// Unknown fields and prompt content are ignored.
+func requestMetadataFromRaw(raw []byte) RequestMetadata {
+	var doc struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+		Reasoning       struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	_ = json.Unmarshal(raw, &doc)
+	effort := doc.Reasoning.Effort
+	if effort == "" {
+		effort = doc.ReasoningEffort
+	}
+	return RequestMetadata{Model: doc.Model, ReasoningEffort: effort}
+}
+
 // IsLoopback reports whether addr refers to the loopback interface. It accepts
 // a bare host, host:port, or bracketed IPv6 form.
 func IsLoopback(addr string) bool {
@@ -403,6 +435,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	return nil
 }
+
+// CloseIdleConnections releases idle upstream transport connections. The
+// managed server calls it when an account runtime is replaced or shut down.
+func (s *Server) CloseIdleConnections() { s.client.CloseIdleConnections() }
 
 // WithCredentials shares transport and replay cache, never mutable credentials.
 func (s *Server) WithCredentials(source CredentialSource) http.Handler {

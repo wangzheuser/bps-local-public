@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,12 @@ func TestDeviceFlow(t *testing.T) {
 				if p.UserCode != "user" || !strings.Contains(p.URL, "client_id="+ExcelClientID) {
 					t.Error("wrong prompt")
 				}
+				// The authorize page needs user_code in the query string; without
+				// it the endpoint degrades into the regular OAuth flow and is
+				// rejected with deviceauth_disabled.
+				if !strings.Contains(p.URL, "user_code="+p.UserCode) {
+					t.Errorf("authorize URL missing user_code: %s", p.URL)
+				}
 				if mode == "cancel" {
 					cancel()
 				}
@@ -103,7 +110,10 @@ func TestDeviceFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 			st, _ := os.Stat(dest)
-			if st.Mode().Perm() != 0600 {
+			// Windows does not expose POSIX permission bits; os.Stat reports
+			// 0666 for regular files there, so the strict check runs only on
+			// Unix where the 0600 mode is meaningful.
+			if runtime.GOOS != "windows" && st.Mode().Perm() != 0600 {
 				t.Fatal("unsafe mode")
 			}
 			store, err := Load(dest)

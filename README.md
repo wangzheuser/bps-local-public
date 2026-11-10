@@ -58,6 +58,14 @@ Windows 构建使用 `go build -o bps-local.exe ./cmd/bps-local`。附带的启�
 
 完整参数、上下文示例及故障排查见 [使用说明](docs/USAGE.md)。`--upstream-transport sse` 是源码保留的旧兼容选项，日常使用保持默认 `ws`。
 
+## 多账号管理版
+
+`cmd/bps-server` 提供多账号管理版：Web 控制台、多账号设备授权与负载均衡、API Key 管理和用量统计，支持 Docker Compose 部署。部署与使用见 [管理版说明](docs/WEB-MANAGEMENT.md)。
+
+```bash
+go build -o bps-server ./cmd/bps-server
+```
+
 ## 许可与来源
 
 项目许可、第三方声明及依赖许可原文统一见根目录 [LICENSE](LICENSE)。

@@ -36,3 +36,9 @@ __pycache__/
 /runtime/
 /auths/
 /.bps-local/
+
+# Managed server runtime state and secrets
+/secrets/
+/data/
+/bps-server
+/bps-server.exe

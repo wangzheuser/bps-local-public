@@ -1,0 +1,95 @@
+// Package gateway fronts the managed server: API key authentication, weighted
+// account scheduling, stream usage instrumentation and usage persistence. Each
+// account keeps its own proxy runtime so credentials and replay caches never
+// mix.
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"sync/atomic"
+	"time"
+
+	"github.com/sunboyzoey/GPT-BPS/internal/auth"
+	"github.com/sunboyzoey/GPT-BPS/internal/proxy"
+	"github.com/sunboyzoey/GPT-BPS/internal/store"
+)
+
+// ProxySource supplies the currently active outbound proxy ("" = direct). It is
+// read on every runtime build so an admin change applies to the next rebuild.
+type ProxySource interface {
+	Get() string
+}
+
+// RuntimeConfig carries the shared upstream settings used to build runtimes.
+type RuntimeConfig struct {
+	Upstream      string
+	Proxy         ProxySource
+	Transport     string
+	WSIdleTimeout time.Duration
+	Verbose       bool
+}
+
+// Runtime is one schedulable BPS account. All mutable scheduling state is
+// guarded by the scheduler mutex except the atomics below.
+type Runtime struct {
+	ID      string
+	Name    string
+	Store   *auth.Store
+	Handler http.Handler
+	// Models reads this account's upstream model catalog.
+	Models func(ctx context.Context) (*proxy.ModelCatalog, error)
+	close  func()
+
+	Active        atomic.Int64
+	Enabled       atomic.Bool
+	AuthRequired  atomic.Bool
+	CooldownUntil atomic.Int64
+
+	// Guarded by Scheduler.mu.
+	weight              int
+	consecutiveFailures int
+	lastErrorCode       string
+}
+
+// RuntimeInfo is the admin-facing snapshot of one runtime.
+type RuntimeInfo struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Enabled        bool   `json:"enabled"`
+	Weight         int    `json:"weight"`
+	ActiveRequests int64  `json:"active_requests"`
+	AuthRequired   bool   `json:"auth_required"`
+	CooldownUntil  int64  `json:"cooldown_until"`
+	LastErrorCode  string `json:"last_error_code"`
+}
+
+// BuildRuntime creates a proxy server for one account. The metadata sink feeds
+// usage instrumentation through the request context without touching prompt
+// content.
+func BuildRuntime(a store.Account, st *auth.Store, cfg RuntimeConfig) (*Runtime, error) {
+	pcfg := proxyConfig(cfg)
+	srv, err := newProxyServer(pcfg, st)
+	if err != nil {
+		return nil, fmt.Errorf("build proxy runtime for %s: %w", a.ID, err)
+	}
+	rt := &Runtime{
+		ID:      a.ID,
+		Name:    a.Name,
+		Store:   st,
+		Handler: srv.Handler(),
+		Models:  srv.Models,
+		close:   srv.CloseIdleConnections,
+		weight:  a.Weight,
+	}
+	rt.Enabled.Store(a.Enabled)
+	return rt, nil
+}
+
+// CloseIdle releases the runtime's upstream transport.
+func (r *Runtime) CloseIdle() {
+	if r.close != nil {
+		r.close()
+	}
+}

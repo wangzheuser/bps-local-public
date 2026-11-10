@@ -139,7 +139,12 @@ func (c *DeviceClient) Login(ctx context.Context, show func(DevicePrompt) error)
 		}
 		seconds = n
 	}
-	if e = show(DevicePrompt{URL: c.base + "/api/accounts/deviceauth/authorize?client_id=" + url.QueryEscape(ExcelClientID), UserCode: start.Code}); e != nil {
+	// The authorize page requires the user_code in the query string. Without it
+	// the endpoint redirects into the regular OAuth authorization flow, which
+	// this client is not registered for and answers with deviceauth_disabled.
+	authorizeURL := c.base + "/api/accounts/deviceauth/authorize?client_id=" +
+		url.QueryEscape(ExcelClientID) + "&user_code=" + url.QueryEscape(start.Code)
+	if e = show(DevicePrompt{URL: authorizeURL, UserCode: start.Code}); e != nil {
 		return nil, e
 	}
 	var grant struct {
