@@ -1,5 +1,10 @@
 # Managed multi-account bridge, single instance by design (SQLite + in-memory
 # scheduler state are not shared across replicas).
+#
+# Environment differences (bind address, cookie security, log rotation) are
+# read from .env so this file stays identical everywhere and a `git pull` can
+# never overwrite a deployment's settings. The defaults below are the safe
+# local-development values.
 services:
   bps-server:
     build: .
@@ -10,17 +15,20 @@ services:
       BPS_ADMIN_ADDR: 0.0.0.0:8791
       BPS_LOCAL_PROXY: ${BPS_LOCAL_PROXY:-}
       BPS_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
-      BPS_COOKIE_SECURE: "false"
+      # Must be "true" behind public HTTPS, otherwise the session cookie is
+      # sent without the Secure attribute.
+      BPS_COOKIE_SECURE: ${BPS_COOKIE_SECURE:-false}
       BPS_USAGE_RETENTION_DAYS: ${BPS_USAGE_RETENTION_DAYS:-30}
     secrets:
       - admin_password
     volumes:
       - bps-data:/data
     ports:
-      # Host ports bind to loopback only; remote access requires a TLS reverse
-      # proxy plus BPS_COOKIE_SECURE=true.
-      - "127.0.0.1:8790:8790"
-      - "127.0.0.1:8791:8791"
+      # Defaults to loopback. Behind a shared reverse proxy set BPS_BIND_IP to
+      # the docker bridge address (usually 172.17.0.1) so the proxy can reach
+      # host.docker.internal.
+      - "${BPS_BIND_IP:-127.0.0.1}:8790:8790"
+      - "${BPS_BIND_IP:-127.0.0.1}:8791:8791"
     read_only: true
     tmpfs:
       - /tmp
@@ -28,6 +36,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: ${BPS_LOG_MAX_SIZE:-10m}
+        max-file: "${BPS_LOG_MAX_FILE:-3}"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8790/healthz"]
       interval: 30s

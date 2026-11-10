@@ -40,6 +40,12 @@ __pycache__/
 # Managed server runtime state and secrets
 /secrets/
 /data/
+# Backups hold OAuth credentials in plaintext: never let them into Git.
+/backups/
+backups/
+# Per-deployment Compose overrides are environment-specific.
+docker-compose.override.yml
+docker-compose.override.yaml
 /bps-server
 /bps-server.exe
 docs/DEPLOY-US2.md
