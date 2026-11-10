@@ -25,6 +25,7 @@ func proxyConfig(cfg RuntimeConfig) proxy.Config {
 		WSIdleTimeout:     cfg.WSIdleTimeout,
 		Verbose:           cfg.Verbose,
 		ImageRelay:        cfg.ImageRelay,
+		ModelMapper:       cfg.ModelMapper,
 		RequestMetadataSink: func(ctx context.Context, meta proxy.RequestMetadata) {
 			if rec := recordFromContext(ctx); rec != nil {
 				rec.setRequestMeta(proxyRequestMetadata{Model: meta.Model, ReasoningEffort: meta.ReasoningEffort})

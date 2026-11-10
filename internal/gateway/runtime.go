@@ -33,6 +33,9 @@ type RuntimeConfig struct {
 	// ImageRelay stages inline base64 images so the upstream can fetch them as
 	// HTTPS URLs. Nil disables inline image support.
 	ImageRelay *basispoints.ImageRelay
+	// ModelMapper aliases the requested model before it reaches the upstream.
+	// Nil leaves every model unchanged.
+	ModelMapper proxy.ModelMapper
 }
 
 // Runtime is one schedulable BPS account. All mutable scheduling state is

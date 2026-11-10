@@ -29,7 +29,8 @@
         <button data-view="accounts" class="nav-btn">账号</button>
         <button data-view="keys" class="nav-btn">API Key</button>
         <button data-view="usage" class="nav-btn">用量</button>
-        <button data-view="settings" class="nav-btn">设置</button>
+        <button data-view="models" class="nav-btn">模型</button>
+      <button data-view="settings" class="nav-btn">设置</button>
       </nav>
       <button id="logout-btn" class="btn subtle">退出登录</button>
     </header>
@@ -113,7 +114,30 @@
         <p id="usage-error" class="error hidden"></p>
       </section>
 
-      <section id="page-settings" class="page hidden">
+      <section id="page-models" class="page hidden">
+      <div class="page-head">
+        <h2>上游模型</h2>
+        <button id="sync-models-btn" class="btn primary">同步上游最新</button>
+      </div>
+      <p class="muted">此列表持久化保存，也是 <code>/v1/models</code> 返回的内容。同步会向当前可调度账号读取一次上游目录。</p>
+      <p id="models-meta" class="muted"></p>
+      <p id="models-error" class="error hidden"></p>
+      <table id="models-table" class="table">
+        <thead><tr><th>模型 ID</th><th>名称</th><th>默认推理强度</th><th>可选推理强度</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>模型映射</h2>
+      <p class="muted">请求中的模型若命中左侧配置，将被替换为右侧模型再发给上游；未配置的模型原样透传。</p>
+      <p id="mappings-error" class="error hidden"></p>
+      <div id="mappings-rows" class="mapping-rows"></div>
+      <div class="row-actions">
+        <button id="add-mapping-btn" class="btn">新增映射</button>
+        <button id="save-mappings-btn" class="btn primary">保存映射</button>
+      </div>
+    </section>
+
+    <section id="page-settings" class="page hidden">
         <h2>网络代理</h2>
         <p class="muted">所有调用上游（BPS 生成与账号设备授权）的请求都会经过此代理。留空表示直连。保存后立即生效，无需重启。</p>
         <div class="settings-card">

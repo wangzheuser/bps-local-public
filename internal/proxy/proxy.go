@@ -55,6 +55,9 @@ type Config struct {
 	// effort after the request body is read. The standalone CLI leaves it nil
 	// and behavior is unchanged.
 	RequestMetadataSink func(ctx context.Context, meta RequestMetadata)
+	// ModelMapper optionally aliases the requested model before the request
+	// goes upstream. Nil or an empty target leaves the model unchanged.
+	ModelMapper ModelMapper
 }
 
 // CredentialSource supplies an isolated credential snapshot.
@@ -181,6 +184,13 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.cfg.RequestMetadataSink != nil {
 		s.cfg.RequestMetadataSink(r.Context(), requestMetadataFromRaw(raw))
+	}
+	// Apply the model alias after recording the client's requested model, so
+	// usage keeps showing what was asked for while the upstream sees the target.
+	raw, _, err = rewriteModel(raw, modelFromRaw(raw), s.cfg.ModelMapper)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "model_mapping_failed", err.Error())
+		return
 	}
 	if s.cfg.ARCTextSession && !arcTextOnly(raw) {
 		s.fail(w, http.StatusBadRequest, "arc_text_only", "ARC text sessions support messages only, with no client tools")

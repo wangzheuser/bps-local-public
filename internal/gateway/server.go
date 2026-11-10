@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -51,57 +52,34 @@ func (g *Gateway) APIHandler() http.Handler {
 	return mux
 }
 
-// handleModels lists the models the selected account may use. The catalog is
-// read from upstream, so it reflects the account's real entitlements rather
-// than a hardcoded list.
+// handleModels lists the models from the persisted catalog. The console syncs
+// it on demand, so this stays a pure read: no account is scheduled and no
+// upstream call happens per request.
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
 		return
 	}
-	rt, err := g.sched.Pick(strings.TrimSpace(r.Header.Get("session_id")))
-	if err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "no_account_available",
-			"no eligible BPS account is available; enable an account or wait for cooldown to end")
+	cat, err := g.db.GetModelCatalog()
+	if errors.Is(err, store.ErrNotFound) {
+		writeAPIError(w, http.StatusServiceUnavailable, "model_catalog_unavailable",
+			"the model catalog has not been synced yet; open the admin console and run \"sync upstream models\"")
 		return
 	}
-	defer g.sched.Release(rt)
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	cat, err := rt.Models(ctx)
 	if err != nil {
-		writeAPIError(w, http.StatusBadGateway, "basispoints_models_unavailable", err.Error())
+		writeAPIError(w, http.StatusInternalServerError, "model_catalog_unreadable", err.Error())
 		return
 	}
 
-	now := g.now().Unix()
-	data := make([]map[string]any, 0, len(cat.Models))
-	for _, m := range cat.Models {
-		efforts := make([]map[string]string, 0, len(m.Efforts))
-		for _, e := range m.Efforts {
-			efforts = append(efforts, map[string]string{"value": e.Value, "label": e.Label})
-		}
-		data = append(data, map[string]any{
-			"id":             m.ID,
-			"object":         "model",
-			"created":        now,
-			"owned_by":       "basispoints",
-			"label":          m.Label,
-			"default_effort": m.DefaultEffort,
-			"efforts":        efforts,
-		})
+	var doc map[string]any
+	if err := json.Unmarshal(cat.Payload, &doc); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "model_catalog_corrupt",
+			"the stored model catalog is not valid JSON; re-sync from the admin console")
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"object":          "list",
-		"data":            data,
-		"default_model":   cat.DefaultModel,
-		"plan_type":       cat.PlanType,
-		"source":          cat.Source,
-		"allowed":         cat.Allowed,
-		"denial_reason":   cat.DenialReason,
-		"restricted_models": cat.RestrictedModels,
-	})
+	// Stamp the sync time so clients can tell how fresh the list is.
+	doc["synced_at"] = cat.SyncedAt
+	writeJSON(w, http.StatusOK, doc)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

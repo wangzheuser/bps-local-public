@@ -91,6 +91,28 @@ var migrations = []struct {
 			`ALTER TABLE api_keys ADD COLUMN key_sealed TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		version: 4,
+		stmts: []string{
+			// One snapshot of the upstream model catalog, refreshed on demand
+			// from the console. Storing the whole document keeps /v1/models a
+			// pure read instead of a live upstream call on every request.
+			`CREATE TABLE model_catalog (
+				id TEXT PRIMARY KEY,
+				payload TEXT NOT NULL,
+				synced_at INTEGER NOT NULL,
+				source_account TEXT NOT NULL DEFAULT ''
+			)`,
+			// Exact-match model aliasing applied to every LLM request. The
+			// source model is the primary key, so a model maps to one target.
+			`CREATE TABLE model_mappings (
+				source_model TEXT PRIMARY KEY,
+				target_model TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)`,
+		},
+	},
 }
 
 // Migrate brings the schema up to the latest version. It fails closed on the

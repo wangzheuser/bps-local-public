@@ -86,6 +86,10 @@ func NewHandler(deps Deps, sessions *SessionManager, static fs.FS) *Handler {
 	mux.HandleFunc("GET /admin/api/settings/proxy", h.requireSession(h.handleGetProxy))
 	mux.HandleFunc("PUT /admin/api/settings/proxy", h.requireSession(h.handlePutProxy))
 	mux.HandleFunc("POST /admin/api/settings/proxy/check", h.requireSession(h.handleCheckProxy))
+	mux.HandleFunc("GET /admin/api/models", h.requireSession(h.handleGetModels))
+	mux.HandleFunc("POST /admin/api/models/sync", h.requireSession(h.handleSyncModels))
+	mux.HandleFunc("GET /admin/api/models/mappings", h.requireSession(h.handleGetMappings))
+	mux.HandleFunc("PUT /admin/api/models/mappings", h.requireSession(h.handlePutMappings))
 
 	mux.HandleFunc("GET /admin/{$}", h.handleIndex)
 	mux.HandleFunc("GET /admin/", h.serveStatic)
@@ -554,6 +558,162 @@ func (h *Handler) handleAccountTest(w http.ResponseWriter, r *http.Request) {
 		"latency_ms":     res.LatencyMS,
 		"terminal":       res.Terminal,
 	})
+}
+
+// --- models ---
+
+// modelCatalogView is the persisted catalog as the console sees it.
+type modelCatalogView struct {
+	Catalog       json.RawMessage `json:"catalog"`
+	SyncedAt      int64           `json:"synced_at"`
+	SourceAccount string          `json:"source_account"`
+}
+
+type modelMappingView struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+// handleGetModels returns the stored snapshot. A never-synced server reports
+// catalog: null so the console can show a "sync first" prompt instead of an
+// empty table.
+func (h *Handler) handleGetModels(w http.ResponseWriter, r *http.Request) {
+	cat, err := h.deps.DB.GetModelCatalog()
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusOK, modelCatalogView{})
+		return
+	}
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "db_query_failed", "查询失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, modelCatalogView{
+		Catalog: json.RawMessage(cat.Payload), SyncedAt: cat.SyncedAt, SourceAccount: cat.SourceAccount,
+	})
+}
+
+// handleSyncModels pulls the catalog from one schedulable account and stores it.
+// A failed sync keeps the previous snapshot: losing the list because the
+// upstream hiccuped would break /v1/models for every client.
+func (h *Handler) handleSyncModels(w http.ResponseWriter, r *http.Request) {
+	rt, err := h.deps.Scheduler.Pick("")
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "no_account_available",
+			"没有可用的账号，请先启用至少一个已授权账号")
+		return
+	}
+	defer h.deps.Scheduler.Release(rt)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	cat, err := rt.Models(ctx)
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, "sync_failed", err.Error())
+		return
+	}
+
+	// Store the OpenAI-compatible shape so /v1/models can serve it verbatim.
+	now := h.now().Unix()
+	data := make([]map[string]any, 0, len(cat.Models))
+	for _, m := range cat.Models {
+		efforts := make([]map[string]string, 0, len(m.Efforts))
+		for _, e := range m.Efforts {
+			efforts = append(efforts, map[string]string{"value": e.Value, "label": e.Label})
+		}
+		data = append(data, map[string]any{
+			"id": m.ID, "object": "model", "created": now, "owned_by": "basispoints",
+			"label": m.Label, "default_effort": m.DefaultEffort, "efforts": efforts,
+		})
+	}
+	payload, err := json.Marshal(map[string]any{
+		"object":            "list",
+		"data":              data,
+		"default_model":     cat.DefaultModel,
+		"plan_type":         cat.PlanType,
+		"source":            cat.Source,
+		"allowed":           cat.Allowed,
+		"denial_reason":     cat.DenialReason,
+		"restricted_models": cat.RestrictedModels,
+	})
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "encode_failed", "序列化模型目录失败")
+		return
+	}
+	if err := h.deps.DB.SaveModelCatalog(payload, rt.Name); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存模型目录失败")
+		return
+	}
+	stored, err := h.deps.DB.GetModelCatalog()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "db_query_failed", "查询失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, modelCatalogView{
+		Catalog: json.RawMessage(stored.Payload), SyncedAt: stored.SyncedAt, SourceAccount: stored.SourceAccount,
+	})
+}
+
+func (h *Handler) handleGetMappings(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.deps.DB.ListModelMappings()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "db_query_failed", "查询失败")
+		return
+	}
+	out := make([]modelMappingView, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, modelMappingView{Source: m.SourceModel, Target: m.TargetModel})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mappings": out})
+}
+
+// handlePutMappings replaces the whole mapping set. The console edits it as a
+// unit, so validation happens here before anything is written.
+func (h *Handler) handlePutMappings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mappings []modelMappingView `json:"mappings"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "请求体无效")
+		return
+	}
+	if len(body.Mappings) > 512 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "映射数量过多")
+		return
+	}
+	seen := make(map[string]struct{}, len(body.Mappings))
+	pairs := make([]store.ModelMapping, 0, len(body.Mappings))
+	for _, m := range body.Mappings {
+		source := strings.TrimSpace(m.Source)
+		target := strings.TrimSpace(m.Target)
+		if source == "" || target == "" {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "映射的源模型与目标模型都必须填写")
+			return
+		}
+		if len(source) > 200 || len(target) > 200 {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "模型名称过长")
+			return
+		}
+		if source == target {
+			// An identity mapping would only add noise; the console filters
+			// these too, but a direct API call must not smuggle one in.
+			continue
+		}
+		if _, dup := seen[source]; dup {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "同一个源模型只能配置一条映射："+source)
+			return
+		}
+		seen[source] = struct{}{}
+		pairs = append(pairs, store.ModelMapping{SourceModel: source, TargetModel: target})
+	}
+	if err := h.deps.DB.ReplaceModelMappings(pairs); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存映射失败")
+		return
+	}
+	out := make([]modelMappingView, 0, len(pairs))
+	for _, m := range pairs {
+		out = append(out, modelMappingView{Source: m.SourceModel, Target: m.TargetModel})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mappings": out})
 }
 
 // --- api keys ---

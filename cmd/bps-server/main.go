@@ -97,7 +97,7 @@ func main() {
 		gw.SetImageRelay(relay)
 	}
 
-	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay)}
+	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay, db)}
 	svc, err := accounts.NewService(db, filepath.Join(cfg.DataDir, "accounts"), proxySvc.Get, manager, nil)
 	if err != nil {
 		log.Fatalf("accounts: %v", err)
@@ -186,13 +186,22 @@ func main() {
 }
 
 // runtimeConfig adapts main config into gateway.RuntimeConfig.
-func runtimeConfig(cfg config, proxy gateway.ProxySource, relay *basispoints.ImageRelay) gateway.RuntimeConfig {
+func runtimeConfig(cfg config, proxy gateway.ProxySource, relay *basispoints.ImageRelay, db *store.DB) gateway.RuntimeConfig {
 	return gateway.RuntimeConfig{
 		Upstream:      basispoints.ResponsesURL,
 		Proxy:         proxy,
 		Transport:     cfg.Transport,
 		WSIdleTimeout: cfg.WSIdleTimeout,
 		ImageRelay:    relay,
+		// Model aliases are read per request so console edits apply without a
+		// restart. A missing mapping passes the model through untouched.
+		ModelMapper: func(source string) (string, error) {
+			target, err := db.GetModelMapping(source)
+			if errors.Is(err, store.ErrNotFound) {
+				return "", nil
+			}
+			return target, err
+		},
 	}
 }
 

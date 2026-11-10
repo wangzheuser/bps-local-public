@@ -146,6 +146,7 @@
     if (view === 'accounts') loadAccounts();
     if (view === 'keys') loadKeys();
     if (view === 'usage') loadUsage();
+    if (view === 'models') loadModels();
     if (view === 'settings') loadProxySettings();
   }
 
@@ -802,6 +803,164 @@
   document.getElementById('usage-next').addEventListener('click', function () {
     state.usageOffset += 50;
     loadUsage();
+  });
+
+  // ---------- 模型 ----------
+  // 已同步的模型 ID 列表，映射下拉与「不在目录」提示都用它。
+  var modelIDs = [];
+  var mappingDraft = [];
+
+  function loadModels() {
+    var errEl = document.getElementById('models-error');
+    var metaEl = document.getElementById('models-meta');
+    errEl.classList.add('hidden');
+    api('/models').then(function (data) {
+      var tbody = document.querySelector('#models-table tbody');
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+      modelIDs = [];
+
+      if (!data.catalog) {
+        metaEl.textContent = '尚未同步。点击「同步上游最新」拉取一次上游模型列表。';
+        return;
+      }
+      var cat = data.catalog;
+      (cat.data || []).forEach(function (m) {
+        modelIDs.push(m.id);
+        var efforts = (m.efforts || []).map(function (e) { return e.value; }).join(' / ');
+        tbody.appendChild(el('tr', null, [
+          el('td', { text: m.id }),
+          el('td', { text: m.label || '—' }),
+          el('td', { text: m.default_effort || '—' }),
+          el('td', { text: efforts || '—' })
+        ]));
+      });
+      metaEl.textContent = '上次同步：' + fmtTime(data.synced_at) +
+        (data.source_account ? '（来自 ' + data.source_account + '）' : '') +
+        '；共 ' + modelIDs.length + ' 个模型';
+    }).catch(function (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+    }).then(loadMappings);
+  }
+
+  function loadMappings() {
+    var errEl = document.getElementById('mappings-error');
+    errEl.classList.add('hidden');
+    api('/models/mappings').then(function (data) {
+      mappingDraft = (data.mappings || []).map(function (m) {
+        return { source: m.source, target: m.target };
+      });
+      renderMappings();
+    }).catch(function (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+    });
+  }
+
+  // modelSelect 生成一个模型下拉；includeBlank 用于「未选择」占位。
+  function modelSelect(value, includeBlank) {
+    var sel = el('select', { class: 'mapping-select' });
+    if (includeBlank) {
+      sel.appendChild(el('option', { value: '', text: '选择模型…' }));
+    }
+    var known = modelIDs.slice();
+    // 已保存但不在当前目录里的值也要显示，否则用户会误以为配置丢了。
+    if (value && known.indexOf(value) === -1) known.push(value);
+    known.forEach(function (id) {
+      sel.appendChild(el('option', { value: id, text: id }));
+    });
+    sel.value = value || '';
+    return sel;
+  }
+
+  function renderMappings() {
+    var box = document.getElementById('mappings-rows');
+    while (box.firstChild) box.removeChild(box.firstChild);
+    if (mappingDraft.length === 0) {
+      box.appendChild(el('p', { class: 'muted', text: '还没有配置任何映射。' }));
+      return;
+    }
+    mappingDraft.forEach(function (row, idx) {
+      var src = modelSelect(row.source, true);
+      var dst = modelSelect(row.target, true);
+      src.addEventListener('change', function () { mappingDraft[idx].source = src.value; });
+      dst.addEventListener('change', function () { mappingDraft[idx].target = dst.value; });
+      var stale = row.target && modelIDs.length && modelIDs.indexOf(row.target) === -1;
+      box.appendChild(el('div', { class: 'mapping-row' }, [
+        src,
+        el('span', { class: 'mapping-arrow', text: '→' }),
+        dst,
+        stale ? el('span', { class: 'mapping-warn', text: '目标不在当前目录' }) : el('span'),
+        el('button', {
+          class: 'btn btn-mini danger', text: '删除',
+          onclick: function () { mappingDraft.splice(idx, 1); renderMappings(); }
+        })
+      ]));
+    });
+  }
+
+  document.getElementById('add-mapping-btn').addEventListener('click', function () {
+    if (modelIDs.length === 0) {
+      toast('请先同步上游模型列表', true);
+      return;
+    }
+    mappingDraft.push({ source: '', target: '' });
+    renderMappings();
+  });
+
+  document.getElementById('save-mappings-btn').addEventListener('click', function () {
+    var errEl = document.getElementById('mappings-error');
+    errEl.classList.add('hidden');
+    var seen = {};
+    var payload = [];
+    for (var i = 0; i < mappingDraft.length; i++) {
+      var s = (mappingDraft[i].source || '').trim();
+      var t = (mappingDraft[i].target || '').trim();
+      if (!s && !t) continue;
+      if (!s || !t) {
+        errEl.textContent = '第 ' + (i + 1) + ' 行的源模型与目标模型都必须选择';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      if (s === t) continue; // 等价于不映射
+      if (seen[s]) {
+        errEl.textContent = '源模型重复：' + s;
+        errEl.classList.remove('hidden');
+        return;
+      }
+      seen[s] = true;
+      payload.push({ source: s, target: t });
+    }
+    api('/models/mappings', { method: 'PUT', body: { mappings: payload } })
+      .then(function (data) {
+        mappingDraft = (data.mappings || []).map(function (m) {
+          return { source: m.source, target: m.target };
+        });
+        renderMappings();
+        toast('映射已保存');
+      })
+      .catch(function (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+      });
+  });
+
+  document.getElementById('sync-models-btn').addEventListener('click', function () {
+    var btn = this;
+    var errEl = document.getElementById('models-error');
+    errEl.classList.add('hidden');
+    btn.disabled = true;
+    btn.textContent = '同步中…';
+    api('/models/sync', { method: 'POST' })
+      .then(function () { toast('模型列表已同步'); loadModels(); })
+      .catch(function (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+      })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = '同步上游最新';
+      });
   });
 
   // ---------- 代理设置 ----------

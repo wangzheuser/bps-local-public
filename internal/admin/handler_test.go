@@ -634,6 +634,111 @@ func TestOverviewReportsImageRelay(t *testing.T) {
 	}
 }
 
+func TestModelsSyncAndMappings(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	// Never synced: the console gets catalog: null rather than an error.
+	rec := e.request(http.MethodGet, "/admin/api/models", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get models = %d %s", rec.Code, rec.Body.String())
+	}
+	var empty struct {
+		Catalog json.RawMessage `json:"catalog"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &empty)
+	if len(empty.Catalog) != 0 && string(empty.Catalog) != "null" {
+		t.Fatalf("expected null catalog, got %s", rec.Body.String())
+	}
+
+	// Sync without an eligible account fails and leaves the catalog empty.
+	rec = e.request(http.MethodPost, "/admin/api/models/sync", "", true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("sync without account = %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+
+	// Wire an account whose upstream serves a catalog, then sync.
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"allowed":true,"plan_type":"prolite","model_catalog":{"models":[
+			{"id":"gpt-5.6-sol","label":"Sol","default_effort":"medium","efforts":[{"value":"low","label":"Light"}]},
+			{"id":"gpt-6-astra","label":"Astra","default_effort":"medium","efforts":[]}
+		],"default_model":"gpt-5.6-sol","source":"chatgpt","restricted_models":[]}}`))
+	}))
+	defer up.Close()
+
+	acct := &store.Account{ID: "acct_m", Name: "M", CredentialPath: "/tmp/m.json", UpstreamAccountID: "up-m", Weight: 1, Enabled: true}
+	if err := e.db.CreateAccount(acct); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := gateway.BuildRuntime(*acct, testAuthStore(t), gateway.RuntimeConfig{Upstream: up.URL, Transport: "sse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Enabled.Store(true)
+	e.sched.Upsert(rt)
+
+	rec = e.request(http.MethodPost, "/admin/api/models/sync", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sync = %d %s", rec.Code, rec.Body.String())
+	}
+	var synced struct {
+		Catalog       json.RawMessage `json:"catalog"`
+		SyncedAt      int64           `json:"synced_at"`
+		SourceAccount string          `json:"source_account"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &synced); err != nil {
+		t.Fatal(err)
+	}
+	if synced.SyncedAt == 0 || synced.SourceAccount != "M" {
+		t.Fatalf("sync metadata = %+v", synced)
+	}
+	var cat struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(synced.Catalog, &cat); err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Data) != 2 || cat.Data[0].ID != "gpt-5.6-sol" {
+		t.Fatalf("catalog = %s", synced.Catalog)
+	}
+
+	// Mappings: replace, then reject bad input.
+	rec = e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"gpt-6-astra","target":"gpt-5.6-sol"}]}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put mappings = %d %s", rec.Code, rec.Body.String())
+	}
+	target, err := e.db.GetModelMapping("gpt-6-astra")
+	if err != nil || target != "gpt-5.6-sol" {
+		t.Fatalf("stored mapping = %q, %v", target, err)
+	}
+
+	rec = e.request(http.MethodGet, "/admin/api/models/mappings", "", true)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "gpt-6-astra") {
+		t.Fatalf("get mappings = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Duplicate source is rejected before anything is written.
+	rec = e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"a","target":"b"},{"source":"a","target":"c"}]}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate source = %d, want 400", rec.Code)
+	}
+	if target, _ := e.db.GetModelMapping("gpt-6-astra"); target != "gpt-5.6-sol" {
+		t.Fatal("a rejected save must not touch stored mappings")
+	}
+
+	// Empty fields are rejected too.
+	rec = e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"x","target":""}]}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty target = %d, want 400", rec.Code)
+	}
+}
+
 func TestStaticAssets(t *testing.T) {
 	e := newTestEnv(t)
 	e.login()
