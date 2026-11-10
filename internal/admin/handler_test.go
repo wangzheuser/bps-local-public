@@ -15,6 +15,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/accounts"
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
 	"github.com/sunboyzoey/GPT-BPS/internal/auth"
+	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -579,6 +580,57 @@ func TestRevealKeyWithoutCiphertext(t *testing.T) {
 	}
 	if !strings.Contains(got.Body.String(), "reveal_unavailable") {
 		t.Fatalf("body = %s", got.Body.String())
+	}
+}
+
+func TestOverviewReportsImageRelay(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	// Disabled: the field is null so the console hides the panel.
+	rec := e.request(http.MethodGet, "/admin/api/overview", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overview = %d %s", rec.Code, rec.Body.String())
+	}
+	var off struct {
+		Relay *struct {
+			MaxBytes int64 `json:"max_bytes"`
+		} `json:"image_relay"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &off)
+	if off.Relay != nil {
+		t.Fatalf("image_relay must be null when disabled: %s", rec.Body.String())
+	}
+
+	// Enabled: capacity fields are present.
+	relay, err := basispoints.NewImageRelay("https://relay.example", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = relay.Close() }()
+	e.handler.deps.Images = relay
+
+	rec = e.request(http.MethodGet, "/admin/api/overview", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overview = %d %s", rec.Code, rec.Body.String())
+	}
+	var on struct {
+		Relay struct {
+			Images    int   `json:"images"`
+			Bytes     int64 `json:"bytes"`
+			MaxBytes  int64 `json:"max_bytes"`
+			MaxImages int   `json:"max_images"`
+			TTL       int   `json:"ttl_seconds"`
+		} `json:"image_relay"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &on); err != nil {
+		t.Fatal(err)
+	}
+	if on.Relay.MaxBytes <= 0 || on.Relay.MaxImages <= 0 || on.Relay.TTL <= 0 {
+		t.Fatalf("relay stats missing: %s", rec.Body.String())
+	}
+	if on.Relay.Images != 0 || on.Relay.Bytes != 0 {
+		t.Fatalf("fresh relay should be empty: %s", rec.Body.String())
 	}
 }
 

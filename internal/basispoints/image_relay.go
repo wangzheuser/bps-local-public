@@ -162,6 +162,39 @@ func (r *ImageRelay) cleanupOrphans(now time.Time) {
 	}
 }
 
+// Stats is a point-in-time snapshot of staged image storage.
+type Stats struct {
+	// Images is the number of live staged images.
+	Images int `json:"images"`
+	// Bytes is the space currently occupied by staged images.
+	Bytes int64 `json:"bytes"`
+	// ReservedBytes is space claimed by uploads still being decoded.
+	ReservedBytes int64 `json:"reserved_bytes"`
+	// MaxBytes is the storage budget; Bytes+ReservedBytes never exceeds it.
+	MaxBytes int64 `json:"max_bytes"`
+	// MaxImages is the entry ceiling.
+	MaxImages int `json:"max_images"`
+	// TTLSeconds is how long a staged image stays fetchable.
+	TTLSeconds int `json:"ttl_seconds"`
+}
+
+// Stats reports current staging usage. It never blocks on uploads.
+func (r *ImageRelay) Stats() Stats {
+	if r == nil {
+		return Stats{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return Stats{
+		Images:        len(r.entries),
+		Bytes:         int64(r.bytes),
+		ReservedBytes: int64(r.reservedBytes),
+		MaxBytes:      int64(imageRelayMaxBytes),
+		MaxImages:     imageRelayMaxEntries,
+		TTLSeconds:    int(imageRelayTTL / time.Second),
+	}
+}
+
 // SetPublicOrigin changes new links without discarding in-flight images.
 func (r *ImageRelay) SetPublicOrigin(baseURL string) error {
 	if err := ValidateImageRelayOrigin(baseURL); err != nil {

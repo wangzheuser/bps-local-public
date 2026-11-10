@@ -150,11 +150,25 @@
   }
 
   // ---------- 总览 ----------
-  function card(label, value) {
+  // tone 为 'warn' 时高亮数值，用于接近上限的容量提示。
+  function card(label, value, tone) {
+    var valueEl = el('div', { class: 'value', text: String(value) });
+    if (tone) valueEl.classList.add('value-' + tone);
     return el('div', { class: 'card' }, [
       el('div', { class: 'label', text: label }),
-      el('div', { class: 'value', text: String(value) })
+      valueEl
     ]);
+  }
+
+  // fmtBytes 把字节数渲染成便于阅读的单位。
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    var units = ['KB', 'MB', 'GB', 'TB'];
+    var v = n / 1024;
+    var i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (v >= 10 ? Math.round(v) : v.toFixed(1)) + ' ' + units[i];
   }
 
   function loadOverview() {
@@ -172,6 +186,15 @@
       box.appendChild(card('输入 Tokens', fmtTokens(u.input_tokens)));
       box.appendChild(card('输出 Tokens', fmtTokens(u.output_tokens)));
       box.appendChild(card('Key 数量', (data.api_keys || {}).enabled + ' / ' + (data.api_keys || {}).total));
+      // 图片暂存用量：仅在中继启用时显示，避免展示无意义的 0。
+      var ir = data.image_relay;
+      if (ir) {
+        var used = ir.bytes + (ir.reserved_bytes || 0);
+        var pct = ir.max_bytes ? Math.round(used * 100 / ir.max_bytes) : 0;
+        box.appendChild(card('图片暂存', fmtBytes(used) + ' / ' + fmtBytes(ir.max_bytes)));
+        box.appendChild(card('暂存图片数', ir.images + ' / ' + ir.max_images));
+        box.appendChild(card('暂存占用率', pct + '%', pct >= 80 ? 'warn' : ''));
+      }
     }).catch(function (err) {
       errEl.textContent = err.message;
       errEl.classList.remove('hidden');

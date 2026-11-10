@@ -11,6 +11,7 @@ import (
 
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
 	"github.com/sunboyzoey/GPT-BPS/internal/auth"
+	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
 )
 
@@ -271,6 +272,46 @@ func TestGatewayHealthz(t *testing.T) {
 	var doc map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil || doc["ok"] != true {
 		t.Fatalf("healthz body %s", rec.Body.String())
+	}
+	// Without a relay the field is absent, not zeroed.
+	if _, ok := doc["image_relay"]; ok {
+		t.Fatalf("image_relay must be omitted when disabled: %s", rec.Body.String())
+	}
+}
+
+func TestGatewayHealthzReportsImageRelay(t *testing.T) {
+	up := fakeSSEUpstream(t, sseCompleted, "", 0)
+	defer up.Close()
+	gw, _, _ := buildTestGateway(t, up.URL, "")
+
+	relay, err := basispoints.NewImageRelay("https://relay.example", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = relay.Close() }()
+	gw.SetImageRelay(relay)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	gw.APIHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz status %d", rec.Code)
+	}
+	var doc struct {
+		OK    bool `json:"ok"`
+		Relay struct {
+			Images    int   `json:"images"`
+			Bytes     int64 `json:"bytes"`
+			MaxBytes  int64 `json:"max_bytes"`
+			MaxImages int   `json:"max_images"`
+			TTL       int   `json:"ttl_seconds"`
+		} `json:"image_relay"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if !doc.OK || doc.Relay.MaxBytes <= 0 || doc.Relay.MaxImages <= 0 || doc.Relay.TTL <= 0 {
+		t.Fatalf("relay stats missing: %s", rec.Body.String())
 	}
 }
 

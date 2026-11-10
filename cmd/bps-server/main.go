@@ -118,6 +118,7 @@ func main() {
 
 	adminHandler := admin.NewHandler(admin.Deps{
 		DB: db, Scheduler: sched, Accounts: svc, Proxy: proxySvc, Runtime: manager, Sealer: sealer,
+		Images: relay,
 	}, admin.NewSessionManager(cfg.AdminPassword, cfg.SessionTTL, cfg.CookieSecure), admin.WebFS())
 
 	apiSrv := &http.Server{Addr: cfg.APIAddr, Handler: gw.APIHandler(), ReadHeaderTimeout: 30 * time.Second}

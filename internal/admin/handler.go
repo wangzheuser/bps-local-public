@@ -15,6 +15,7 @@ import (
 
 	"github.com/sunboyzoey/GPT-BPS/internal/accounts"
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
+	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -34,6 +35,8 @@ type Deps struct {
 	Proxy     *proxysettings.Service
 	Runtime   ProxyRuntime
 	Sealer    *apikeys.Sealer
+	// Images reports inline-image staging usage; nil hides the panel.
+	Images    *basispoints.ImageRelay
 	Now       func() time.Time
 }
 
@@ -219,12 +222,22 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"cooldown": cooldown, "auth_required": authReq,
 		},
 		"api_keys": map[string]any{"total": len(keys), "enabled": keysEnabled},
+		"image_relay": h.imageRelayView(),
 		"usage_today": map[string]any{
 			"requests": usage.Requests, "completed": usage.Completed, "failed": usage.Failed,
 			"input_tokens": nullToJSON(usage.InputTokens), "output_tokens": nullToJSON(usage.OutputTokens),
 			"total_tokens": nullToJSON(usage.TotalTokens), "avg_duration_ms": nullFloatToJSON(usage.AvgDurationMS),
 		},
 	})
+}
+
+// imageRelayView reports staging usage, or nil when the relay is disabled so
+// the console can hide the panel instead of showing zeroes.
+func (h *Handler) imageRelayView() any {
+	if h.deps.Images == nil {
+		return nil
+	}
+	return h.deps.Images.Stats()
 }
 
 // --- accounts ---

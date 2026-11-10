@@ -117,7 +117,18 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"ok":false}`)
 		return
 	}
-	_, _ = io.WriteString(w, `{"ok":true}`)
+	// Include staging usage so operators can watch the disk budget without
+	// opening the console. Omitted entirely when the relay is disabled.
+	if g.images == nil {
+		_, _ = io.WriteString(w, `{"ok":true}`)
+		return
+	}
+	body, err := json.Marshal(map[string]any{"ok": true, "image_relay": g.images.Stats()})
+	if err != nil {
+		_, _ = io.WriteString(w, `{"ok":true}`)
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 func writeAPIError(w http.ResponseWriter, status int, code, message string) {
