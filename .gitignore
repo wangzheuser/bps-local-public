@@ -49,3 +49,5 @@ docker-compose.override.yaml
 /bps-server
 /bps-server.exe
 docs/DEPLOY-US2.md
+# 一次性迁移脚本，含真实账号标识数据
+scripts/sync-accounts-from-server.py
