@@ -122,7 +122,6 @@ curl -N http://127.0.0.1:8790/v1/responses \
 启用加密存储之前创建的 Key 没有密文，点「复制」会提示无法恢复，需重新创建并保存。
 
 ### 6.1 查询可用模型（`GET /v1/models`）
-
 用任意有效 API Key 调用，返回**所选账号的真实上游模型目录**（OpenAI 兼容格式）：
 
 ```bash
@@ -133,6 +132,38 @@ curl -s http://127.0.0.1:8790/v1/models \
 响应包含 `data[].id`、`label`、`default_effort`、`efforts`（可选推理强度），以及 `default_model`、`plan_type`、`source`、`restricted_models`。
 
 模型列表随账号计划变化，因此不做本地硬编码或长期缓存；每次请求都会向当前可调度账号的上游读取。无可用账号时返回 503 `no_account_available`。
+
+### 6.2 内联图片（base64）支持
+
+上游 BPS 只能抓取 HTTPS 图片 URL，不接受 `data:image/...;base64` 内联数据。启用图片中继后，本服务会自动把内联图片暂存为临时 URL，客户端可以直接发 base64：
+
+```json
+{
+  "model": "gpt-5.6-luna",
+  "input": [{"role": "user", "content": [
+    {"type": "input_text", "text": "这张图里有什么？"},
+    {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0..."}
+  ]}],
+  "stream": true
+}
+```
+
+**启用条件**：设置 `BPS_PUBLIC_BASE_URL` 为上游可访问的 HTTPS 源（例如 `https://bps.codeai.de5.net`）。留空则保持原行为——内联图片返回 400。
+
+**工作方式**：请求体中的 data URL 被替换为 `{BPS_PUBLIC_BASE_URL}/api/bps-images/{token}`，上游按该地址抓取。该地址免鉴权（上游不带 API Key），令牌为不可枚举的 HMAC，10 分钟后失效。
+
+**资源上限**（防止高并发下磁盘被撑满）：
+
+| 限制 | 值 |
+|---|---|
+| 暂存总预算 | 256 MiB |
+| 条目数 | 512 |
+| 单图 | 20 MiB / 64 百万像素 |
+| 单请求图片总量 | 32 MiB |
+| 单请求图片数 | 128 |
+| 保留时间 | 10 分钟 |
+
+暂存文件位于数据目录的 `image-relay/` 下，按 TTL 自动清理；进程异常退出后，下次启动会清理超过 TTL 的残留目录。超出预算时返回 503 `basispoints_image_relay_unavailable`。
 
 ## 7. 用量统计
 
