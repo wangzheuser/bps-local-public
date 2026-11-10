@@ -34,7 +34,10 @@ var (
 const (
 	ImageRelayPath             = "/api/bps-images/"
 	imageRelayTTL              = 10 * time.Minute
-	imageRelayMaxBytes         = 1 << 30
+	// Staged images are short-lived (TTL) and capped on disk, so a burst of
+	// sessions can never fill the volume: the budget is a hard ceiling, not a
+	// per-request allowance.
+	imageRelayMaxBytes         = 256 << 20
 	imageRelayMaxEntries       = 512
 	imageRelayMaxImageBytes    = 20 << 20
 	imageRelayMaxRequestBytes  = 32 << 20

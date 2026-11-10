@@ -142,6 +142,12 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", s.handleResponses)
 	mux.HandleFunc("/responses", s.handleResponses)
+	// Staged images are fetched by the upstream itself, which has no API key of
+	// ours, so this route stays unauthenticated. The token in the path is an
+	// unguessable HMAC and expires after imageRelayTTL.
+	if s.cfg.ImageRelay != nil {
+		mux.Handle(basispoints.ImageRelayPath, s.cfg.ImageRelay)
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _, err := s.store.Credentials()
 		w.Header().Set("Content-Type", "application/json")

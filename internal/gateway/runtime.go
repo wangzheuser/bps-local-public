@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sunboyzoey/GPT-BPS/internal/auth"
+	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxy"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
 )
@@ -29,6 +30,9 @@ type RuntimeConfig struct {
 	Transport     string
 	WSIdleTimeout time.Duration
 	Verbose       bool
+	// ImageRelay stages inline base64 images so the upstream can fetch them as
+	// HTTPS URLs. Nil disables inline image support.
+	ImageRelay *basispoints.ImageRelay
 }
 
 // Runtime is one schedulable BPS account. All mutable scheduling state is

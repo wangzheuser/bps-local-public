@@ -44,6 +44,9 @@ type config struct {
 	CookieSecure     bool
 	SessionTTL       time.Duration
 	UsageRetention   time.Duration
+	// PublicBaseURL is the HTTPS origin the upstream can reach to fetch staged
+	// images. Empty disables inline base64 image support.
+	PublicBaseURL string
 }
 
 var version = "0.1.0-managed-dev"
@@ -78,7 +81,20 @@ func main() {
 		log.Printf("outbound proxy: %s", proxysettings.Redacted(active))
 	}
 
-	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc)}
+	// Stage inline base64 images so the upstream can fetch them as HTTPS URLs.
+	// Disabled unless a public origin is configured, because the upstream must
+	// be able to reach it.
+	var relay *basispoints.ImageRelay
+	if cfg.PublicBaseURL != "" {
+		relay, err = basispoints.NewImageRelay(cfg.PublicBaseURL, filepath.Join(cfg.DataDir, "image-relay"))
+		if err != nil {
+			log.Fatalf("image relay: %v", err)
+		}
+		defer func() { _ = relay.Close() }()
+		log.Printf("inline image relay enabled: %s%s", cfg.PublicBaseURL, basispoints.ImageRelayPath)
+	}
+
+	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay)}
 	svc, err := accounts.NewService(db, filepath.Join(cfg.DataDir, "accounts"), proxySvc.Get, manager, nil)
 	if err != nil {
 		log.Fatalf("accounts: %v", err)
@@ -166,12 +182,13 @@ func main() {
 }
 
 // runtimeConfig adapts main config into gateway.RuntimeConfig.
-func runtimeConfig(cfg config, proxy gateway.ProxySource) gateway.RuntimeConfig {
+func runtimeConfig(cfg config, proxy gateway.ProxySource, relay *basispoints.ImageRelay) gateway.RuntimeConfig {
 	return gateway.RuntimeConfig{
 		Upstream:      basispoints.ResponsesURL,
 		Proxy:         proxy,
 		Transport:     cfg.Transport,
 		WSIdleTimeout: cfg.WSIdleTimeout,
+		ImageRelay:    relay,
 	}
 }
 
@@ -299,6 +316,7 @@ func loadConfig() (config, error) {
 		ProxyURL:       strings.TrimSpace(os.Getenv("BPS_LOCAL_PROXY")),
 		Transport:      env("BPS_UPSTREAM_TRANSPORT", "ws"),
 		CookieSecure:   env("BPS_COOKIE_SECURE", "false") == "true",
+		PublicBaseURL:  strings.TrimSpace(os.Getenv("BPS_PUBLIC_BASE_URL")),
 	}
 	if cfg.Transport != "ws" && cfg.Transport != "sse" {
 		return cfg, fmt.Errorf("BPS_UPSTREAM_TRANSPORT must be ws or sse, got %q", cfg.Transport)
