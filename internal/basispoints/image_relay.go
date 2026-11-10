@@ -58,9 +58,11 @@ type ImageRelay struct {
 	reservedBytes   int
 	reservedEntries int
 	retiredEntries  int
-	root            string
-	dir             string
-	closed          bool
+	// evicted counts entries dropped to make room, surfaced in Stats.
+	evicted int
+	root    string
+	dir     string
+	closed  bool
 	stop            chan struct{}
 	done            chan struct{}
 	downloads       chan struct{}
@@ -72,8 +74,12 @@ type relayImage struct {
 	reserved    int
 	contentType string
 	expires     time.Time
-	readers     int
-	retired     bool
+	// lastAccess orders eviction: the least recently served entry goes first.
+	// A freshly staged image has the newest stamp, so it survives a sweep that
+	// makes room for itself.
+	lastAccess time.Time
+	readers    int
+	retired    bool
 }
 
 func ValidateImageRelayOrigin(baseURL string) error {
@@ -176,6 +182,8 @@ type Stats struct {
 	MaxImages int `json:"max_images"`
 	// TTLSeconds is how long a staged image stays fetchable.
 	TTLSeconds int `json:"ttl_seconds"`
+	// EvictedTotal counts images dropped to make room for newer ones.
+	EvictedTotal int `json:"evicted_total"`
 }
 
 // Stats reports current staging usage. It never blocks on uploads.
@@ -192,6 +200,7 @@ func (r *ImageRelay) Stats() Stats {
 		MaxBytes:      int64(imageRelayMaxBytes),
 		MaxImages:     imageRelayMaxEntries,
 		TTLSeconds:    int(imageRelayTTL / time.Second),
+		EvictedTotal:  r.evicted,
 	}
 }
 
@@ -293,12 +302,15 @@ func (r *ImageRelay) Rewrite(raw []byte, scope string) ([]byte, error) {
 	for token, img := range images {
 		if existing := r.entries[token]; existing != nil {
 			existing.expires = now.Add(imageRelayTTL)
+			// Re-sending a known image keeps it, so refresh its recency too.
+			r.touchLocked(existing, now)
 			continue
 		}
 		r.reservedBytes -= img.reserved
 		r.reservedEntries--
 		img.reserved = 0
 		img.expires = now.Add(imageRelayTTL)
+		img.lastAccess = now
 		r.entries[token] = img
 		r.bytes += img.size
 	}
@@ -335,19 +347,26 @@ func (r *ImageRelay) storeImage(raw, scope string) (*relayImage, string, error) 
 	}
 	reservation := base64.StdEncoding.DecodedLen(len(payload)) + 1
 	r.mu.Lock()
-	r.pruneLocked(time.Now())
+	now := time.Now()
+	r.pruneLocked(now)
 	if r.closed {
 		r.mu.Unlock()
 		return nil, "", ErrImageRelayStorage
 	}
-	if r.bytes+r.reservedBytes+reservation > imageRelayMaxBytes || len(r.entries)+r.reservedEntries+r.retiredEntries >= imageRelayMaxEntries {
+	// Make room by evicting the least recently served images. Entries the
+	// upstream is downloading right now are skipped: dropping one would break
+	// an in-flight request to serve this one.
+	if !r.fitsLocked(reservation) {
+		r.evictLocked(reservation, now)
+	}
+	if !r.fitsLocked(reservation) {
 		r.mu.Unlock()
 		return nil, "", ErrImageRelayFull
 	}
 	r.reservedBytes += reservation
 	r.reservedEntries++
 	r.mu.Unlock()
-	img := &relayImage{reserved: reservation}
+	img := &relayImage{reserved: reservation, lastAccess: now}
 	success := false
 	defer func() {
 		if !success {
@@ -438,6 +457,41 @@ func (r *ImageRelay) pruneLocked(now time.Time) {
 	}
 }
 
+// fitsLocked reports whether one more image of the given size fits.
+func (r *ImageRelay) fitsLocked(reservation int) bool {
+	return r.bytes+r.reservedBytes+reservation <= imageRelayMaxBytes &&
+		len(r.entries)+r.reservedEntries+r.retiredEntries < imageRelayMaxEntries
+}
+
+// evictLocked drops least recently served entries until a reservation of the
+// given size fits, or until nothing more can be evicted. Entries with active
+// readers are never candidates: the upstream may be streaming them right now.
+func (r *ImageRelay) evictLocked(reservation int, now time.Time) {
+	for !r.fitsLocked(reservation) {
+		var victimToken string
+		var victim *relayImage
+		for token, img := range r.entries {
+			if img.readers > 0 || img.retired {
+				continue
+			}
+			if victim == nil || img.lastAccess.Before(victim.lastAccess) {
+				victimToken, victim = token, img
+			}
+		}
+		if victim == nil {
+			return // everything left is in use; the caller reports full
+		}
+		_ = now
+		r.removeLocked(victimToken, victim)
+		r.evicted++
+	}
+}
+
+// touchLocked records that an entry was just served.
+func (r *ImageRelay) touchLocked(img *relayImage, now time.Time) {
+	img.lastAccess = now
+}
+
 func (r *ImageRelay) expire(token string, expected *relayImage) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -470,7 +524,8 @@ func (r *ImageRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	img := r.entries[token]
-	if img != nil && !time.Now().Before(img.expires) {
+	now := time.Now()
+	if img != nil && !now.Before(img.expires) {
 		r.removeLocked(token, img)
 		img = nil
 	}
@@ -482,6 +537,9 @@ func (r *ImageRelay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	file, err := os.Open(img.path)
 	if err == nil {
 		img.readers++
+		// Serving an entry makes it the most recently used, so it is the last
+		// candidate for eviction from now on.
+		r.touchLocked(img, now)
 	}
 	r.mu.Unlock()
 	if err != nil {

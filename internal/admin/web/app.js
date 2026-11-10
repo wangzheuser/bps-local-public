@@ -194,6 +194,7 @@
         box.appendChild(card('图片暂存', fmtBytes(used) + ' / ' + fmtBytes(ir.max_bytes)));
         box.appendChild(card('暂存图片数', ir.images + ' / ' + ir.max_images));
         box.appendChild(card('暂存占用率', pct + '%', pct >= 80 ? 'warn' : ''));
+        box.appendChild(card('累计淘汰', ir.evicted_total || 0));
       }
     }).catch(function (err) {
       errEl.textContent = err.message;
