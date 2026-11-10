@@ -11,21 +11,28 @@ import (
 	"time"
 
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
+	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
 )
 
 // Gateway is the managed Responses API front end.
 type Gateway struct {
-	db   *store.DB
+	db    *store.DB
 	sched *Scheduler
-	newID func(prefix string) (string, error)
-	now   func() time.Time
+	// images serves staged inline images to the upstream. Nil disables it.
+	images *basispoints.ImageRelay
+	newID  func(prefix string) (string, error)
+	now    func() time.Time
 }
 
 // NewGateway builds the gateway.
 func NewGateway(db *store.DB, sched *Scheduler) *Gateway {
 	return &Gateway{db: db, sched: sched, newID: apikeys.NewID, now: time.Now}
 }
+
+// SetImageRelay attaches the inline-image relay. It must be called before
+// serving requests.
+func (g *Gateway) SetImageRelay(relay *basispoints.ImageRelay) { g.images = relay }
 
 // APIHandler assembles the client-facing routes. /healthz is unauthenticated;
 // responses routes require an API key.
@@ -35,6 +42,12 @@ func (g *Gateway) APIHandler() http.Handler {
 	mux.Handle("/v1/responses", g.apiKeyAuth(http.HandlerFunc(g.handleResponses)))
 	mux.Handle("/responses", g.apiKeyAuth(http.HandlerFunc(g.handleResponses)))
 	mux.Handle("/v1/models", g.apiKeyAuth(http.HandlerFunc(g.handleModels)))
+	// Staged images are fetched by the upstream, which carries no API key, so
+	// this route stays unauthenticated. The path token is an unguessable HMAC
+	// and expires after the relay TTL.
+	if g.images != nil {
+		mux.Handle(basispoints.ImageRelayPath, g.images)
+	}
 	return mux
 }
 

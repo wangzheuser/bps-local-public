@@ -92,6 +92,9 @@ func main() {
 		}
 		defer func() { _ = relay.Close() }()
 		log.Printf("inline image relay enabled: %s%s", cfg.PublicBaseURL, basispoints.ImageRelayPath)
+		// The gateway serves the staged URLs; account runtimes rewrite the
+		// inline data URLs into them.
+		gw.SetImageRelay(relay)
 	}
 
 	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay)}
