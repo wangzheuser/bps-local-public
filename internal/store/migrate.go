@@ -82,6 +82,15 @@ var migrations = []struct {
 			)`,
 		},
 	},
+	{
+		version: 3,
+		stmts: []string{
+			// Sealed key material lets the console show a saved key again
+			// without storing plaintext. Empty means the key predates this
+			// column and cannot be revealed.
+			`ALTER TABLE api_keys ADD COLUMN key_sealed TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 // Migrate brings the schema up to the latest version. It fails closed on the

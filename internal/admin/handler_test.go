@@ -55,7 +55,11 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	sessions := NewSessionManager("test-password", time.Hour, false)
-	handler := NewHandler(Deps{DB: db, Scheduler: sched, Accounts: svc, Now: time.Now}, sessions, staticFS())
+	sealer, err := apikeys.OpenSealer(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(Deps{DB: db, Scheduler: sched, Accounts: svc, Sealer: sealer, Now: time.Now}, sessions, staticFS())
 	return &testEnv{t: t, handler: handler, db: db, sched: sched, svc: svc}
 }
 
@@ -492,6 +496,92 @@ func TestAccountModelsAndTestEndpoints(t *testing.T) {
 	}
 }
 
+func TestRevealKeyRoundTrip(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	// Create through the API so the sealed copy is produced the real way.
+	rec := e.request(http.MethodPost, "/admin/api/api-keys", `{"name":"reveal-me"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Key     string `json:"key"`
+		KeyView struct {
+			ID         string `json:"id"`
+			Prefix     string `json:"prefix"`
+			Revealable bool   `json:"revealable"`
+		} `json:"key_view"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Key == "" {
+		t.Fatal("create must return the plaintext once")
+	}
+
+	// The list must stay masked and must not carry the plaintext.
+	listRec := e.request(http.MethodGet, "/admin/api/api-keys", "", true)
+	if strings.Contains(listRec.Body.String(), created.Key) {
+		t.Fatal("list response leaked the plaintext key")
+	}
+	var listed struct {
+		Keys []struct {
+			ID         string `json:"id"`
+			Prefix     string `json:"prefix"`
+			Revealable bool   `json:"revealable"`
+		} `json:"keys"`
+	}
+	_ = json.Unmarshal(listRec.Body.Bytes(), &listed)
+	if len(listed.Keys) != 1 || !listed.Keys[0].Revealable {
+		t.Fatalf("list payload = %s", listRec.Body.String())
+	}
+	if strings.Contains(listed.Keys[0].Prefix, created.Key[len(created.Key)-10:]) {
+		t.Fatal("prefix must be masked, not the full key")
+	}
+
+	// Reveal returns the same plaintext and forbids caching.
+	rev := e.request(http.MethodPost, "/admin/api/api-keys/"+created.KeyView.ID+"/reveal", "", true)
+	if rev.Code != http.StatusOK {
+		t.Fatalf("reveal = %d %s", rev.Code, rev.Body.String())
+	}
+	if cc := rev.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	var revealed struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(rev.Body.Bytes(), &revealed)
+	if revealed.Key != created.Key {
+		t.Fatal("reveal returned a different key")
+	}
+
+	// GET must not work: a link or prefetch cannot pull a key.
+	if got := e.request(http.MethodGet, "/admin/api/api-keys/"+created.KeyView.ID+"/reveal", "", true); got.Code == http.StatusOK {
+		t.Fatal("GET reveal must not succeed")
+	}
+}
+
+func TestRevealKeyWithoutCiphertext(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+	// A key created before encrypted storage has no sealed copy.
+	rec := &store.APIKey{
+		ID: "key_legacy", Name: "legacy", Prefix: "sk-bps-legacy12",
+		KeyHash: apikeys.Hash("sk-bps-legacy"), Enabled: true,
+	}
+	if err := e.db.CreateAPIKey(rec); err != nil {
+		t.Fatal(err)
+	}
+	got := e.request(http.MethodPost, "/admin/api/api-keys/key_legacy/reveal", "", true)
+	if got.Code != http.StatusConflict {
+		t.Fatalf("legacy reveal = %d, want 409: %s", got.Code, got.Body.String())
+	}
+	if !strings.Contains(got.Body.String(), "reveal_unavailable") {
+		t.Fatalf("body = %s", got.Body.String())
+	}
+}
+
 func TestStaticAssets(t *testing.T) {
 	e := newTestEnv(t)
 	e.login()
@@ -518,9 +608,13 @@ func (e *testEnv) withProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.proxy = svc
+	sealer, err := apikeys.OpenSealer(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	e.handler = NewHandler(Deps{
 		DB: e.db, Scheduler: e.sched, Accounts: e.svc, Proxy: svc, Runtime: &stubRuntime{svc: svc},
-		Now: time.Now,
+		Sealer: sealer, Now: time.Now,
 	}, NewSessionManager("test-password", time.Hour, false), staticFS())
 }
 

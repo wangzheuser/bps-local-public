@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sunboyzoey/GPT-BPS/internal/accounts"
+	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
 	"github.com/sunboyzoey/GPT-BPS/internal/admin"
 	"github.com/sunboyzoey/GPT-BPS/internal/auth"
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
@@ -89,8 +90,15 @@ func main() {
 		log.Printf("startup account load: %v", err)
 	}
 
+	// The sealer keeps API keys recoverable for the console without storing
+	// plaintext; its secret lives beside the data, never in the database.
+	sealer, err := apikeys.OpenSealer(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("api key sealer: %v", err)
+	}
+
 	adminHandler := admin.NewHandler(admin.Deps{
-		DB: db, Scheduler: sched, Accounts: svc, Proxy: proxySvc, Runtime: manager,
+		DB: db, Scheduler: sched, Accounts: svc, Proxy: proxySvc, Runtime: manager, Sealer: sealer,
 	}, admin.NewSessionManager(cfg.AdminPassword, cfg.SessionTTL, cfg.CookieSecure), admin.WebFS())
 
 	apiSrv := &http.Server{Addr: cfg.APIAddr, Handler: gw.APIHandler(), ReadHeaderTimeout: 30 * time.Second}

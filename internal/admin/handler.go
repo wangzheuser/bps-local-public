@@ -33,6 +33,7 @@ type Deps struct {
 	Accounts  *accounts.Service
 	Proxy     *proxysettings.Service
 	Runtime   ProxyRuntime
+	Sealer    *apikeys.Sealer
 	Now       func() time.Time
 }
 
@@ -73,6 +74,7 @@ func NewHandler(deps Deps, sessions *SessionManager, static fs.FS) *Handler {
 	mux.HandleFunc("POST /admin/api/api-keys", h.requireSession(h.handleCreateKey))
 	mux.HandleFunc("POST /admin/api/api-keys/{id}/enabled", h.requireSession(h.handleKeyEnabled))
 	mux.HandleFunc("POST /admin/api/api-keys/{id}/revoke", h.requireSession(h.handleKeyRevoke))
+	mux.HandleFunc("POST /admin/api/api-keys/{id}/reveal", h.requireSession(h.handleRevealKey))
 	mux.HandleFunc("DELETE /admin/api/api-keys/{id}", h.requireSession(h.handleDeleteKey))
 
 	mux.HandleFunc("GET /admin/api/usage/summary", h.requireSession(h.handleUsageSummary))
@@ -553,6 +555,9 @@ type apiKeyView struct {
 	ExpiresAt  int64  `json:"expires_at"`
 	LastUsedAt int64  `json:"last_used_at"`
 	CreatedAt  int64  `json:"created_at"`
+	// Revealable tells the console whether a copy button can work. It leaks
+	// only the presence of ciphertext, never the key itself.
+	Revealable bool `json:"revealable"`
 }
 
 func keyViews(rows []*store.APIKey, now time.Time) []apiKeyView {
@@ -563,9 +568,31 @@ func keyViews(rows []*store.APIKey, now time.Time) []apiKeyView {
 			Enabled: k.Enabled, Revoked: k.RevokedAt != 0,
 			Expired: k.ExpiresAt != 0 && k.ExpiresAt <= now.UnixMilli(),
 			ExpiresAt: k.ExpiresAt, LastUsedAt: k.LastUsedAt, CreatedAt: k.CreatedAt,
+			Revealable: k.KeySealed != "",
 		})
 	}
 	return out
+}
+
+// handleRevealKey returns the plaintext of one saved key. It is POST-only so a
+// link, prefetch or cross-site navigation cannot pull a key out of the console.
+func (h *Handler) handleRevealKey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	k, err := h.deps.DB.GetAPIKey(id)
+	if err != nil {
+		writeAdminError(w, http.StatusNotFound, "not_found", "Key 不存在")
+		return
+	}
+	plain, err := h.deps.Sealer.Open(k.KeySealed)
+	if err != nil {
+		writeAdminError(w, http.StatusConflict, "reveal_unavailable",
+			"该 Key 创建于加密存储启用之前，无法恢复明文；请重新创建并保存")
+		return
+	}
+	// Never let a browser or proxy cache key material.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	writeJSON(w, http.StatusOK, map[string]any{"id": k.ID, "key": plain})
 }
 
 func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
@@ -609,6 +636,16 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		ID: id, Name: name, Prefix: gen.DisplayPrefix, KeyHash: gen.Hash,
 		Enabled: true, ExpiresAt: body.ExpiresAt,
 	}
+	// Keep an encrypted copy so the console can reveal the key later; the
+	// database alone never holds the plaintext. A sealing failure is surfaced
+	// instead of silently producing a key that can never be copied again.
+	sealed, err := h.deps.Sealer.Seal(gen.Plaintext)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "seal_failed",
+			"无法加密保存 Key，请检查数据目录权限")
+		return
+	}
+	rec.KeySealed = sealed
 	if err := h.deps.DB.CreateAPIKey(rec); err != nil {
 		writeAdminError(w, http.StatusInternalServerError, "create_failed", "保存 Key 失败")
 		return

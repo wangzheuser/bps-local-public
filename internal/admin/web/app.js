@@ -545,6 +545,12 @@
         else statusEl.appendChild(badge('禁用', 'off'));
 
         var actions = el('td');
+        // 复制按钮：按需向服务端索取明文，列表本身只显示脱敏前缀。
+        actions.appendChild(el('button', {
+          class: 'btn btn-mini', text: '复制',
+          title: k.revealable ? '复制完整 Key' : '该 Key 创建于加密存储启用前，无法复制',
+          onclick: function () { copyKey(k); }
+        }));
         if (!k.revoked) {
           actions.appendChild(el('button', {
             class: 'btn btn-mini', text: k.enabled ? '禁用' : '启用',
@@ -604,6 +610,41 @@
       ])
     ]);
   });
+
+  // copyKey 取回明文并写入剪贴板。明文只在这一次请求里出现，不进入页面状态。
+  function copyKey(k) {
+    api('/api-keys/' + k.id + '/reveal', { method: 'POST' })
+      .then(function (data) {
+        return writeClipboard(data.key).then(function () {
+          toast('已复制完整 Key');
+        });
+      })
+      .catch(function (err) {
+        toast(err.message || '复制失败', true);
+      });
+  }
+
+  // writeClipboard 优先用异步剪贴板 API，非安全上下文回退到 execCommand。
+  function writeClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        return fallbackCopy(text);
+      });
+    }
+    return Promise.resolve(fallbackCopy(text));
+  }
+
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
 
   function deleteKey(k) {
     var msg = '确定删除 Key「' + k.name + '」？\n\n' +

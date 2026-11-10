@@ -7,13 +7,15 @@ import (
 	"time"
 )
 
-// APIKey is the persistent record for one client key. Only the SHA-256 hash is
-// stored; the plaintext exists solely in the creation response.
+// APIKey is the persistent record for one client key. The SHA-256 hash
+// authenticates requests; the optional sealed copy lets the console reveal the
+// key again without keeping plaintext in the database.
 type APIKey struct {
 	ID         string
 	Name       string
 	Prefix     string
 	KeyHash    string
+	KeySealed  string
 	Enabled    bool
 	ExpiresAt  int64 // Unix ms, 0 = never
 	RevokedAt  int64 // Unix ms, 0 = active
@@ -22,13 +24,13 @@ type APIKey struct {
 	UpdatedAt  int64
 }
 
-const apiKeyColumns = `id, name, prefix, key_hash, enabled, expires_at, revoked_at, last_used_at, created_at, updated_at`
+const apiKeyColumns = `id, name, prefix, key_hash, key_sealed, enabled, expires_at, revoked_at, last_used_at, created_at, updated_at`
 
 func scanAPIKey(row interface{ Scan(...any) error }) (*APIKey, error) {
 	var k APIKey
 	var enabled int
 	var expires, revoked, lastUsed sql.NullInt64
-	if err := row.Scan(&k.ID, &k.Name, &k.Prefix, &k.KeyHash, &enabled, &expires, &revoked, &lastUsed, &k.CreatedAt, &k.UpdatedAt); err != nil {
+	if err := row.Scan(&k.ID, &k.Name, &k.Prefix, &k.KeyHash, &k.KeySealed, &enabled, &expires, &revoked, &lastUsed, &k.CreatedAt, &k.UpdatedAt); err != nil {
 		return nil, err
 	}
 	k.Enabled = enabled == 1
@@ -43,8 +45,8 @@ func (d *DB) CreateAPIKey(k *APIKey) error {
 	now := time.Now().UnixMilli()
 	k.CreatedAt, k.UpdatedAt = now, now
 	_, err := d.Exec(`INSERT INTO api_keys (`+apiKeyColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		k.ID, k.Name, k.Prefix, k.KeyHash, boolInt(k.Enabled),
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		k.ID, k.Name, k.Prefix, k.KeyHash, k.KeySealed, boolInt(k.Enabled),
 		nullInt(k.ExpiresAt), nullInt(k.RevokedAt), nullInt(k.LastUsedAt), k.CreatedAt, k.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert api key: %w", err)
