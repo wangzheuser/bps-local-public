@@ -813,6 +813,7 @@
   function loadModels() {
     var errEl = document.getElementById('models-error');
     var metaEl = document.getElementById('models-meta');
+    var emptyEl = document.getElementById('models-empty');
     errEl.classList.add('hidden');
     api('/models').then(function (data) {
       var tbody = document.querySelector('#models-table tbody');
@@ -820,23 +821,33 @@
       modelIDs = [];
 
       if (!data.catalog) {
-        metaEl.textContent = '尚未同步。点击「同步上游最新」拉取一次上游模型列表。';
+        metaEl.textContent = '';
+        emptyEl.classList.remove('hidden');
+        refreshModelOptions();
         return;
       }
+      emptyEl.classList.add('hidden');
       var cat = data.catalog;
       (cat.data || []).forEach(function (m) {
         modelIDs.push(m.id);
-        var efforts = (m.efforts || []).map(function (e) { return e.value; }).join(' / ');
+        var efforts = el('td', { class: 'efforts' });
+        (m.efforts || []).forEach(function (e) {
+          efforts.appendChild(el('span', { class: 'effort-pill', text: e.value }));
+        });
+        if (!m.efforts || m.efforts.length === 0) {
+          efforts.appendChild(el('span', { class: 'muted', text: '—' }));
+        }
         tbody.appendChild(el('tr', null, [
-          el('td', { text: m.id }),
+          el('td', { class: 'mono', text: m.id }),
           el('td', { text: m.label || '—' }),
           el('td', { text: m.default_effort || '—' }),
-          el('td', { text: efforts || '—' })
+          efforts
         ]));
       });
       metaEl.textContent = '上次同步：' + fmtTime(data.synced_at) +
         (data.source_account ? '（来自 ' + data.source_account + '）' : '') +
         '；共 ' + modelIDs.length + ' 个模型';
+      refreshModelOptions();
     }).catch(function (err) {
       errEl.textContent = err.message;
       errEl.classList.remove('hidden');
@@ -857,14 +868,64 @@
     });
   }
 
-  // modelSelect 生成一个模型下拉；includeBlank 用于「未选择」占位。
-  function modelSelect(value, includeBlank) {
-    var sel = el('select', { class: 'mapping-select' });
-    if (includeBlank) {
-      sel.appendChild(el('option', { value: '', text: '选择模型…' }));
+  // 源模型是否命中某个模型 ID。只认 * 和 ?，与后端保持同一套语义。
+  function globMatch(pattern, model) {
+    var p = 0, m = 0, starP = -1, starM = 0;
+    while (m < model.length) {
+      if (p < pattern.length && (pattern[p] === '?' || pattern[p] === model[m])) {
+        p++; m++;
+      } else if (p < pattern.length && pattern[p] === '*') {
+        starP = p; starM = m; p++;
+      } else if (starP >= 0) {
+        p = starP + 1; starM++; m = starM;
+      } else {
+        return false;
+      }
     }
+    while (p < pattern.length && pattern[p] === '*') p++;
+    return p === pattern.length;
+  }
+
+  function hasWildcard(s) {
+    return s.indexOf('*') >= 0 || s.indexOf('?') >= 0;
+  }
+
+  // matchSummary 说明一条源模式当前会影响多少模型，帮助用户确认通配符写法。
+  function matchSummary(pattern) {
+    if (!pattern) return { text: '', cls: 'mapping-hint' };
+    if (modelIDs.length === 0) return { text: '', cls: 'mapping-hint' };
+    var hits = 0;
+    for (var i = 0; i < modelIDs.length; i++) {
+      if (globMatch(pattern, modelIDs[i])) hits++;
+    }
+    if (hits > 0) {
+      return {
+        text: hasWildcard(pattern) ? '匹配 ' + hits + ' 个模型' : '精确匹配',
+        cls: 'mapping-hint ok'
+      };
+    }
+    return {
+      text: hasWildcard(pattern) ? '当前目录无匹配' : '不在当前目录',
+      cls: 'mapping-hint warn'
+    };
+  }
+
+  // 源模型输入：datalist 同时支持下拉选择与手动填写通配符。
+  function modelInput(value, placeholder) {
+    var input = el('input', {
+      type: 'text', class: 'mapping-input', list: 'model-options',
+      placeholder: placeholder || '选择或输入，如 gpt-6*',
+      autocomplete: 'off', spellcheck: 'false'
+    });
+    input.value = value || '';
+    return input;
+  }
+
+  // 目标模型必须是具体模型名，因此只用下拉，避免填出无法解析的通配符。
+  function targetSelect(value) {
+    var sel = el('select', { class: 'mapping-input' });
+    sel.appendChild(el('option', { value: '', text: '选择模型…' }));
     var known = modelIDs.slice();
-    // 已保存但不在当前目录里的值也要显示，否则用户会误以为配置丢了。
     if (value && known.indexOf(value) === -1) known.push(value);
     known.forEach(function (id) {
       sel.appendChild(el('option', { value: id, text: id }));
@@ -873,24 +934,47 @@
     return sel;
   }
 
+  function refreshModelOptions() {
+    var dl = document.getElementById('model-options');
+    while (dl.firstChild) dl.removeChild(dl.firstChild);
+    modelIDs.forEach(function (id) {
+      dl.appendChild(el('option', { value: id }));
+    });
+  }
+
   function renderMappings() {
     var box = document.getElementById('mappings-rows');
+    var emptyEl = document.getElementById('mappings-empty');
     while (box.firstChild) box.removeChild(box.firstChild);
+
     if (mappingDraft.length === 0) {
-      box.appendChild(el('p', { class: 'muted', text: '还没有配置任何映射。' }));
+      emptyEl.classList.remove('hidden');
       return;
     }
+    emptyEl.classList.add('hidden');
+
     mappingDraft.forEach(function (row, idx) {
-      var src = modelSelect(row.source, true);
-      var dst = modelSelect(row.target, true);
-      src.addEventListener('change', function () { mappingDraft[idx].source = src.value; });
+      var src = modelInput(row.source);
+      var dst = targetSelect(row.target);
+      var hint = el('span', { class: 'mapping-hint' });
+
+      function syncHint() {
+        var s = matchSummary(src.value.trim());
+        hint.textContent = s.text;
+        hint.className = s.cls;
+      }
+      src.addEventListener('input', function () {
+        mappingDraft[idx].source = src.value;
+        syncHint();
+      });
       dst.addEventListener('change', function () { mappingDraft[idx].target = dst.value; });
-      var stale = row.target && modelIDs.length && modelIDs.indexOf(row.target) === -1;
+      syncHint();
+
       box.appendChild(el('div', { class: 'mapping-row' }, [
         src,
         el('span', { class: 'mapping-arrow', text: '→' }),
         dst,
-        stale ? el('span', { class: 'mapping-warn', text: '目标不在当前目录' }) : el('span'),
+        hint,
         el('button', {
           class: 'btn btn-mini danger', text: '删除',
           onclick: function () { mappingDraft.splice(idx, 1); renderMappings(); }
@@ -918,7 +1002,13 @@
       var t = (mappingDraft[i].target || '').trim();
       if (!s && !t) continue;
       if (!s || !t) {
-        errEl.textContent = '第 ' + (i + 1) + ' 行的源模型与目标模型都必须选择';
+        errEl.textContent = '第 ' + (i + 1) + ' 行的源模型与目标模型都必须填写';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      // 目标是发给上游的具体模型名，通配符无法解析。
+      if (hasWildcard(t)) {
+        errEl.textContent = '第 ' + (i + 1) + ' 行的目标模型不能包含通配符';
         errEl.classList.remove('hidden');
         return;
       }

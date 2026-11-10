@@ -16,6 +16,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/accounts"
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
+	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -36,8 +37,11 @@ type Deps struct {
 	Runtime   ProxyRuntime
 	Sealer    *apikeys.Sealer
 	// Images reports inline-image staging usage; nil hides the panel.
-	Images    *basispoints.ImageRelay
-	Now       func() time.Time
+	Images *basispoints.ImageRelay
+	// Models caches model aliases; saving mappings invalidates it so edits take
+	// effect on the next request. Nil disables invalidation.
+	Models *modelmap.Cache
+	Now    func() time.Time
 }
 
 // Handler serves /admin/* including the embedded Web UI.
@@ -693,6 +697,13 @@ func (h *Handler) handlePutMappings(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusBadRequest, "invalid_request", "模型名称过长")
 			return
 		}
+		// The target is sent upstream verbatim, so a wildcard there could never
+		// resolve to a real model. Reject it instead of failing the request later.
+		if modelmap.HasWildcard(target) {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request",
+				"目标模型不能包含通配符，请填写具体的模型名称："+target)
+			return
+		}
 		if source == target {
 			// An identity mapping would only add noise; the console filters
 			// these too, but a direct API call must not smuggle one in.
@@ -709,6 +720,8 @@ func (h *Handler) handlePutMappings(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存映射失败")
 		return
 	}
+	// Make the new rules visible to the very next request.
+	h.deps.Models.Invalidate()
 	out := make([]modelMappingView, 0, len(pairs))
 	for _, m := range pairs {
 		out = append(out, modelMappingView{Source: m.SourceModel, Target: m.TargetModel})

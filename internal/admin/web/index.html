@@ -115,25 +115,48 @@
       </section>
 
       <section id="page-models" class="page hidden">
-      <div class="page-head">
-        <h2>上游模型</h2>
-        <button id="sync-models-btn" class="btn primary">同步上游最新</button>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>上游模型</h2>
+            <p class="muted">此列表持久化保存，也是 <code>/v1/models</code> 返回的内容。同步会向当前可调度账号读取一次上游目录。</p>
+          </div>
+          <button id="sync-models-btn" class="btn primary">同步上游最新</button>
+        </div>
+        <p id="models-meta" class="panel-meta"></p>
+        <p id="models-error" class="error hidden"></p>
+        <div class="table-scroll">
+          <table id="models-table" class="table table-compact">
+            <thead><tr><th>模型 ID</th><th>名称</th><th>默认</th><th>可选推理强度</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="models-empty" class="empty-state hidden">尚未同步。点击右上角「同步上游最新」拉取一次上游模型列表。</p>
       </div>
-      <p class="muted">此列表持久化保存，也是 <code>/v1/models</code> 返回的内容。同步会向当前可调度账号读取一次上游目录。</p>
-      <p id="models-meta" class="muted"></p>
-      <p id="models-error" class="error hidden"></p>
-      <table id="models-table" class="table">
-        <thead><tr><th>模型 ID</th><th>名称</th><th>默认推理强度</th><th>可选推理强度</th></tr></thead>
-        <tbody></tbody>
-      </table>
 
-      <h2>模型映射</h2>
-      <p class="muted">请求中的模型若命中左侧配置，将被替换为右侧模型再发给上游；未配置的模型原样透传。</p>
-      <p id="mappings-error" class="error hidden"></p>
-      <div id="mappings-rows" class="mapping-rows"></div>
-      <div class="row-actions">
-        <button id="add-mapping-btn" class="btn">新增映射</button>
-        <button id="save-mappings-btn" class="btn primary">保存映射</button>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>模型映射</h2>
+            <p class="muted">
+              请求命中「源模型」时替换为「目标模型」再发给上游，未命中则原样透传。
+              源模型支持通配符：<code>*</code> 匹配任意长度（含空），<code>?</code> 匹配单个字符，例如 <code>gpt-6*</code>。
+            </p>
+          </div>
+          <div class="panel-actions">
+            <button id="add-mapping-btn" class="btn">新增映射</button>
+            <button id="save-mappings-btn" class="btn primary">保存映射</button>
+          </div>
+        </div>
+        <p id="mappings-error" class="error hidden"></p>
+        <div class="mapping-table">
+          <div class="mapping-head">
+            <span>源模型</span><span></span><span>目标模型</span><span>匹配情况</span><span></span>
+          </div>
+          <div id="mappings-rows" class="mapping-rows"></div>
+        </div>
+        <p id="mappings-empty" class="empty-state">还没有配置任何映射。点击「新增映射」开始。</p>
+        <datalist id="model-options"></datalist>
       </div>
     </section>
 

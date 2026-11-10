@@ -28,6 +28,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/admin"
 	"github.com/sunboyzoey/GPT-BPS/internal/auth"
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
+	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -97,7 +98,22 @@ func main() {
 		gw.SetImageRelay(relay)
 	}
 
-	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay, db)}
+	// Model aliases are cached in memory: wildcard patterns must be matched
+	// against every rule, so a per-request query would scan the table each time.
+	// The console invalidates the cache after saving.
+	modelAliases := modelmap.NewCache(func() ([]modelmap.Rule, error) {
+		rows, err := db.ListModelMappings()
+		if err != nil {
+			return nil, err
+		}
+		rules := make([]modelmap.Rule, 0, len(rows))
+		for _, m := range rows {
+			rules = append(rules, modelmap.Rule{Pattern: m.SourceModel, Target: m.TargetModel})
+		}
+		return rules, nil
+	})
+
+	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay, modelAliases)}
 	svc, err := accounts.NewService(db, filepath.Join(cfg.DataDir, "accounts"), proxySvc.Get, manager, nil)
 	if err != nil {
 		log.Fatalf("accounts: %v", err)
@@ -116,9 +132,10 @@ func main() {
 		log.Fatalf("api key sealer: %v", err)
 	}
 
+
 	adminHandler := admin.NewHandler(admin.Deps{
 		DB: db, Scheduler: sched, Accounts: svc, Proxy: proxySvc, Runtime: manager, Sealer: sealer,
-		Images: relay,
+		Images: relay, Models: modelAliases,
 	}, admin.NewSessionManager(cfg.AdminPassword, cfg.SessionTTL, cfg.CookieSecure), admin.WebFS())
 
 	apiSrv := &http.Server{Addr: cfg.APIAddr, Handler: gw.APIHandler(), ReadHeaderTimeout: 30 * time.Second}
@@ -186,22 +203,17 @@ func main() {
 }
 
 // runtimeConfig adapts main config into gateway.RuntimeConfig.
-func runtimeConfig(cfg config, proxy gateway.ProxySource, relay *basispoints.ImageRelay, db *store.DB) gateway.RuntimeConfig {
+func runtimeConfig(cfg config, proxy gateway.ProxySource, relay *basispoints.ImageRelay, models *modelmap.Cache) gateway.RuntimeConfig {
 	return gateway.RuntimeConfig{
 		Upstream:      basispoints.ResponsesURL,
 		Proxy:         proxy,
 		Transport:     cfg.Transport,
 		WSIdleTimeout: cfg.WSIdleTimeout,
 		ImageRelay:    relay,
-		// Model aliases are read per request so console edits apply without a
-		// restart. A missing mapping passes the model through untouched.
-		ModelMapper: func(source string) (string, error) {
-			target, err := db.GetModelMapping(source)
-			if errors.Is(err, store.ErrNotFound) {
-				return "", nil
-			}
-			return target, err
-		},
+		// Aliases resolve from an in-memory rule set; wildcard patterns need
+		// every rule, so the console invalidates the cache on save instead of
+		// the proxy querying per request.
+		ModelMapper: models.Resolve,
 	}
 }
 

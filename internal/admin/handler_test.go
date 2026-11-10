@@ -16,6 +16,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
 	"github.com/sunboyzoey/GPT-BPS/internal/auth"
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
+	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -736,6 +737,79 @@ func TestModelsSyncAndMappings(t *testing.T) {
 		`{"mappings":[{"source":"x","target":""}]}`, true)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty target = %d, want 400", rec.Code)
+	}
+}
+
+// Wildcards are allowed on the source but never on the target.
+func TestMappingWildcardRules(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	// A wildcard source is accepted.
+	rec := e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"gpt-6*","target":"gpt-5.6-sol"},{"source":"gpt-?.?-sol","target":"gpt-5.6-luna"}]}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wildcard source = %d %s", rec.Code, rec.Body.String())
+	}
+	if got, err := e.db.GetModelMapping("gpt-6*"); err != nil || got != "gpt-5.6-sol" {
+		t.Fatalf("stored wildcard = %q, %v", got, err)
+	}
+
+	// A wildcard target is rejected: it could never resolve upstream.
+	rec = e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"gpt-6*","target":"gpt-5*"}]}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("wildcard target = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "通配符") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	// The rejected save must not disturb the stored set.
+	if got, _ := e.db.GetModelMapping("gpt-6*"); got != "gpt-5.6-sol" {
+		t.Fatalf("stored mapping changed: %q", got)
+	}
+
+	// '?' is also a wildcard and equally rejected in the target.
+	rec = e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"x","target":"gpt-?.6"}]}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("? in target = %d, want 400", rec.Code)
+	}
+}
+
+// Saving mappings must invalidate the resolver cache so edits apply at once.
+func TestMappingSaveInvalidatesCache(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	cache := modelmap.NewCache(func() ([]modelmap.Rule, error) {
+		rows, err := e.db.ListModelMappings()
+		if err != nil {
+			return nil, err
+		}
+		rules := make([]modelmap.Rule, 0, len(rows))
+		for _, m := range rows {
+			rules = append(rules, modelmap.Rule{Pattern: m.SourceModel, Target: m.TargetModel})
+		}
+		return rules, nil
+	})
+	e.handler.deps.Models = cache
+
+	// Prime the cache with an empty rule set.
+	if got, err := cache.Resolve("gpt-6-astra"); err != nil || got != "" {
+		t.Fatalf("initial resolve = %q, %v", got, err)
+	}
+
+	rec := e.request(http.MethodPut, "/admin/api/models/mappings",
+		`{"mappings":[{"source":"gpt-6*","target":"gpt-5.6-sol"}]}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The new rule must be visible without a restart.
+	got, err := cache.Resolve("gpt-6-astra")
+	if err != nil || got != "gpt-5.6-sol" {
+		t.Fatalf("after save resolve = %q, %v", got, err)
 	}
 }
 
