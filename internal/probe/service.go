@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -136,8 +138,9 @@ func (s *Service) targetModels() ([]string, error) {
 	return out, nil
 }
 
-// run probes accounts in parallel while serialising the probes within one
-// account, which keeps each account's upstream load low.
+// run probes accounts with limited concurrency. Upstream rejects a burst of
+// long generations, so the number of accounts probed at once is capped and each
+// account stays serial internally.
 func (s *Service) run(ctx context.Context, accounts []*store.Account, models []string) {
 	bank, err := modeltrace.Load()
 	if err != nil {
@@ -145,11 +148,19 @@ func (s *Service) run(ctx context.Context, accounts []*store.Account, models []s
 		return
 	}
 
+	limit := s.concurrency()
+	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for _, a := range accounts {
 		wg.Add(1)
 		go func(a *store.Account) {
 			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
 			s.probeAccount(ctx, bank, a, models)
 		}(a)
 	}
@@ -161,6 +172,17 @@ func (s *Service) run(ctx context.Context, accounts []*store.Account, models []s
 	}
 	_ = s.db.SetProbeLastRun(s.now().UnixMilli())
 	s.finish(nil)
+}
+
+// concurrency caps how many accounts are probed in parallel. Probing sends long
+// generations, and the upstream throttles bursts, so the default is one.
+func (s *Service) concurrency() int {
+	if v := os.Getenv("BPS_PROBE_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 8 {
+			return n
+		}
+	}
+	return 1
 }
 
 func (s *Service) finish(err error) {
@@ -192,7 +214,10 @@ func (s *Service) probeAccount(ctx context.Context, bank *modeltrace.Bank, a *st
 		answers := make([]modeltrace.Answer, 0, len(challenges))
 		var genErr string
 		for _, ch := range challenges {
-			text, err := runTest(ctx, rt, model, ch.Prompt)
+			if ctx.Err() != nil {
+				return
+			}
+			text, err := runTestWithRetry(ctx, rt, model, ch.Prompt, probeAttempts)
 			if err != nil {
 				genErr = err.Error()
 				break
@@ -312,6 +337,40 @@ func runTest(ctx context.Context, rt *gateway.Runtime, model, prompt string) (st
 	return res.Text, nil
 }
 
+// probeAttempts is how many times one challenge is retried. Upstream overload
+// surfaces as a transient error, so a short retry recovers most of them.
+const probeAttempts = 3
+
+// runTestWithRetry retries a failed challenge with a growing pause. It gives up
+// on cancellation so stopping a run does not wait for the retries.
+func runTestWithRetry(ctx context.Context, rt *gateway.Runtime, model, prompt string, attempts int) (string, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		text, err := runTest(ctx, rt, model, prompt)
+		if err == nil {
+			return text, nil
+		}
+		lastErr = err
+		if i == attempts-1 {
+			break
+		}
+		// Back off before the next attempt: 5s, then 10s.
+		wait := time.Duration(5*(i+1)) * time.Second
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return "", lastErr
+}
+
 
 // ChallengeCount reports how many probes each model gets, defaulting to the
 // bank's recommended 3 when unset.
@@ -361,4 +420,5 @@ func (s *Service) maybeStartScheduled() {
 		s.mu.Unlock()
 	}
 }
+
 

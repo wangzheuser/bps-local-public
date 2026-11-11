@@ -155,8 +155,11 @@
           <span class="hint">分钟，0 表示关闭</span>
         </label>
         <button id="save-interval-btn" class="btn">保存</button>
-        <span id="cap-status" class="muted"></span>
       </div>
+      <div id="cap-progress" class="cap-progress hidden">
+        <div class="cap-progress-track"><div id="cap-progress-bar" class="cap-progress-bar"></div></div>
+      </div>
+      <p id="cap-status" class="cap-status muted"></p>
       <p id="cap-error" class="error hidden"></p>
       <table id="cap-table" class="table">
         <thead><tr><th>账号</th><th>模型</th><th>归因为</th><th>自判概率</th><th>结论</th><th>检测时间</th></tr></thead>

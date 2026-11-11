@@ -1073,21 +1073,37 @@
 
       (data.cells || []).forEach(function (c) {
         var verdict;
+        var isRunning = !!(data.status && data.status.running);
         if (c.error) {
-          verdict = el('span', { class: 'cap-err', text: '检测失败' });
+          // A failed probe says nothing about the model, so it must not look
+          // like a downgrade. Detect the upstream-overload wording and show it
+          // as "waiting to retry" rather than a hard failure.
+          var transient = /upstream|overload|timeout|502|503/i.test(c.error);
+          verdict = el('span', {
+            class: 'cap-badge err',
+            text: transient ? '待复测' : '未测出',
+            title: c.error
+          });
         } else if (c.verified) {
-          verdict = el('span', { class: 'cap-ok', text: '真实提供' });
+          verdict = el('span', { class: 'cap-badge ok', text: '真实提供' });
         } else {
-          verdict = el('span', { class: 'cap-bad', text: '已降级' });
+          verdict = el('span', {
+            class: 'cap-badge bad',
+            text: '已降级',
+            title: '归因为 ' + (c.top || '未知')
+          });
         }
-        tbody.appendChild(el('tr', null, [
+        var row = el('tr', null, [
           el('td', { text: c.account }),
           el('td', { text: c.model }),
           el('td', { text: c.error ? '—' : (c.top || '—') }),
           el('td', { text: c.error ? '—' : (c.self_prob * 100).toFixed(1) + '%' }),
           el('td', null, [verdict]),
-          el('td', { text: c.checked_at ? fmtTime(c.checked_at) : '—' })
-        ]));
+          el('td', { class: 'cap-time', text: c.checked_at ? fmtTime(c.checked_at) : '—' })
+        ]);
+        // Rows being re-measured are dimmed while a run is in progress.
+        if (isRunning) row.classList.add('cap-pending');
+        tbody.appendChild(row);
       });
 
       // 定时配置
@@ -1101,21 +1117,70 @@
 
       // 进度
       var st = data.status || {};
-      if (st.running) {
-        statusEl.textContent = '检测中 ' + st.done + ' / ' + st.total +
-          (st.failed ? '（失败 ' + st.failed + '）' : '');
-        scheduleCapPoll();
-      } else if (st.finished_at) {
-        statusEl.textContent = '上次完成：' + fmtTime(st.finished_at) +
-          (st.failed ? '，失败 ' + st.failed + ' 项' : '') +
-          (st.last_error ? '；' + st.last_error : '');
-      } else if (data.last_run) {
-        statusEl.textContent = '上次运行：' + fmtTime(data.last_run);
-      }
+      // The button follows the run state, so it stays disabled for the whole
+      // background run instead of flipping back as soon as the request returns.
+      setDetectButton(!!st.running);
+      renderCapProgress(st, data.last_run);
+      if (st.running) scheduleCapPoll();
     }).catch(function (err) {
       errEl.textContent = err.message;
       errEl.classList.remove('hidden');
     });
+  }
+
+  // renderCapProgress draws the progress bar and the status line.
+  function renderCapProgress(st, lastRun) {
+    var wrap = document.getElementById('cap-progress');
+    var bar = document.getElementById('cap-progress-bar');
+    var statusEl = document.getElementById('cap-status');
+    if (!wrap || !bar || !statusEl) return;
+
+    if (st.running) {
+      var total = st.total || 0;
+      var done = st.done || 0;
+      var pct = total ? Math.round(done * 100 / total) : 0;
+      wrap.classList.remove('hidden');
+      bar.style.width = pct + '%';
+      bar.classList.toggle('stalled', done === 0);
+      var eta = '';
+      if (done > 0 && st.started_at) {
+        var elapsed = (Date.now() - st.started_at) / 1000;
+        var remain = Math.max(0, Math.round(elapsed / done * (total - done)));
+        eta = '，预计剩余 ' + fmtDuration(remain);
+      }
+      statusEl.textContent = '检测中 ' + done + ' / ' + total +
+        '（' + pct + '%）' +
+        (st.failed ? '，失败 ' + st.failed : '') + eta;
+      return;
+    }
+
+    wrap.classList.add('hidden');
+    if (st.last_error) {
+      statusEl.textContent = '上次检测异常：' + st.last_error;
+      return;
+    }
+    if (st.finished_at) {
+      statusEl.textContent = '上次完成：' + fmtTime(st.finished_at) +
+        '（共 ' + (st.total || 0) + ' 项' +
+        (st.failed ? '，失败 ' + st.failed : '') + '）';
+      return;
+    }
+    if (lastRun) {
+      statusEl.textContent = '上次运行：' + fmtTime(lastRun);
+      return;
+    }
+    statusEl.textContent = '';
+  }
+
+  // fmtDuration renders seconds as a compact human duration.
+  function fmtDuration(seconds) {
+    seconds = Math.max(0, Math.round(seconds));
+    if (seconds < 60) return seconds + ' 秒';
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    if (m < 60) return s ? m + ' 分 ' + s + ' 秒' : m + ' 分钟';
+    var h = Math.floor(m / 60);
+    return h + ' 小时 ' + (m % 60) + ' 分';
   }
 
   function scheduleCapPoll() {
@@ -1130,19 +1195,39 @@
     var btn = this;
     var errEl = document.getElementById('cap-error');
     errEl.classList.add('hidden');
-    btn.disabled = true;
-    btn.textContent = '检测中…';
+    setDetectButton(true);
     api('/capabilities/detect', { method: 'POST' })
-      .then(function () { toast('检测已启动'); loadCapabilities(); })
+      .then(function (status) {
+        // The run continues in the background; the button stays disabled until
+        // polling reports it finished.
+        if (status && status.running) {
+          toast('检测已启动，约需 ' + estimateMinutes(status.total) + ' 分钟');
+        } else {
+          toast('检测已启动');
+        }
+        loadCapabilities();
+      })
       .catch(function (err) {
         errEl.textContent = err.message;
         errEl.classList.remove('hidden');
-      })
-      .then(function () {
-        btn.disabled = false;
-        btn.textContent = '立即检测';
+        setDetectButton(false);
       });
   });
+
+  // setDetectButton reflects the real run state rather than the request state.
+  function setDetectButton(running) {
+    var btn = document.getElementById('detect-cap-btn');
+    if (!btn) return;
+    btn.disabled = !!running;
+    btn.textContent = running ? '检测中…' : '立即检测';
+  }
+
+  // estimateMinutes gives a rough duration from the number of account/model
+  // pairs, using the observed ~25s per pair for three challenges.
+  function estimateMinutes(total) {
+    if (!total) return 0;
+    return Math.max(1, Math.round(total * 25 / 60));
+  }
 
   document.getElementById('save-interval-btn').addEventListener('click', function () {
     var errEl = document.getElementById('cap-error');
@@ -1272,4 +1357,5 @@
     }
   }).catch(function () { showLogin(); });
 })();
+
 

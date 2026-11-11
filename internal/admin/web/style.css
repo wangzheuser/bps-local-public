@@ -222,14 +222,52 @@ main { max-width: 1100px; margin: 0 auto; padding: 20px; }
 
 /* 账号模型能力 */
 .cap-toolbar {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 14px; margin-bottom: 12px;
+  background: #f8fafc; border: 1px solid var(--border); border-radius: var(--radius);
 }
-.cap-schedule { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-.cap-schedule input {
-  width: 90px; padding: 6px 8px; border: 1px solid var(--border);
-  border-radius: var(--radius); font: inherit;
+.cap-schedule { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #33475b; }
+.cap-schedule input, .cap-schedule select {
+  padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: var(--radius); font: inherit; background: #fff;
 }
-.cap-ok { color: #0f7b3f; font-weight: 600; }
-.cap-bad { color: #b45309; font-weight: 600; }
-.cap-err { color: #b91c1c; font-weight: 600; }
+.cap-schedule input { width: 90px; }
+
+/* 进度条 */
+.cap-progress { margin-bottom: 8px; }
+.cap-progress-track {
+  height: 8px; background: #e6ebf2; border-radius: 999px; overflow: hidden;
+}
+.cap-progress-bar {
+  height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+  transition: width .4s ease;
+}
+/* 刚开始还没有任何完成项时，用流动条纹表示确实在跑 */
+.cap-progress-bar.stalled {
+  background-image: linear-gradient(45deg,
+    rgba(255,255,255,.35) 25%, transparent 25%,
+    transparent 50%, rgba(255,255,255,.35) 50%,
+    rgba(255,255,255,.35) 75%, transparent 75%);
+  background-size: 16px 16px;
+  animation: cap-stripes 1s linear infinite;
+}
+@keyframes cap-stripes {
+  from { background-position: 0 0; }
+  to { background-position: 16px 0; }
+}
+.cap-status { font-size: 13px; margin: 0 0 12px; }
+
+/* 结论徽章 */
+.cap-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.cap-badge.ok { background: #e7f6ec; color: #0f7b3f; }
+.cap-badge.bad { background: #fdf0e3; color: #b45309; }
+.cap-badge.err { background: #f1f3f6; color: #6b7a8d; }
+.cap-badge.unknown { background: #f1f3f6; color: #6b7a8d; }
+
+/* 检测中的行用浅色提示，避免与已完成的混淆 */
+#cap-table tbody tr.cap-pending td { color: #93a1b3; }
+
