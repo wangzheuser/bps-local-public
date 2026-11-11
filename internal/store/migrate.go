@@ -133,7 +133,8 @@ var migrations = []struct {
 			// Probe scheduling configuration lives with the other settings.
 			`INSERT INTO settings (key, value, updated_at) VALUES
 				('probe_interval_minutes', '0', 0),
-				('probe_last_run', '0', 0)
+				('probe_last_run', '0', 0),
+				('probe_challenges', '3', 0)
 				ON CONFLICT(key) DO NOTHING`,
 		},
 	},
@@ -177,3 +178,4 @@ func (d *DB) Migrate() error {
 	}
 	return nil
 }
+

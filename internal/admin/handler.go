@@ -18,6 +18,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
+	"github.com/sunboyzoey/GPT-BPS/internal/modeltrace"
 	"github.com/sunboyzoey/GPT-BPS/internal/probe"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -788,10 +789,12 @@ func (h *Handler) handleGetCapabilities(w http.ResponseWriter, r *http.Request) 
 	}
 	resp["cells"] = cells
 
-	interval, lastRun, err := h.deps.DB.GetProbeSchedule()
+	interval, lastRun, challenges, err := h.deps.DB.GetProbeSchedule()
 	if err == nil {
 		resp["interval_minutes"] = interval
 		resp["last_run"] = lastRun
+		resp["challenges"] = challenges
+		resp["max_challenges"] = modeltrace.MaxChallenges
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -811,25 +814,50 @@ func (h *Handler) handleDetectCapabilities(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, status)
 }
 
-// handleScheduleCapabilities persists the scheduled probing interval.
+// handleScheduleCapabilities persists the scheduled probing interval and how
+// many challenges each model gets.
 func (h *Handler) handleScheduleCapabilities(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IntervalMinutes *int `json:"interval_minutes"`
+		Challenges      *int `json:"challenges"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || body.IntervalMinutes == nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "请求体无效")
 		return
 	}
-	minutes := *body.IntervalMinutes
-	if minutes < 0 || minutes > 7*24*60 {
-		writeAdminError(w, http.StatusBadRequest, "invalid_request", "间隔必须在 0 到 10080 分钟之间")
+	if body.IntervalMinutes == nil && body.Challenges == nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "没有需要保存的字段")
 		return
 	}
-	if err := h.deps.DB.SetProbeInterval(minutes); err != nil {
-		writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存失败")
-		return
+	out := map[string]any{}
+	if body.IntervalMinutes != nil {
+		minutes := *body.IntervalMinutes
+		if minutes < 0 || minutes > 7*24*60 {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "间隔必须在 0 到 10080 分钟之间")
+			return
+		}
+		if err := h.deps.DB.SetProbeInterval(minutes); err != nil {
+			writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存失败")
+			return
+		}
+		out["interval_minutes"] = minutes
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"interval_minutes": minutes})
+	if body.Challenges != nil {
+		n := *body.Challenges
+		// Below 1 there is nothing to attribute; above 3 buys nothing because
+		// the bank has no calibration beyond three probes.
+		if n < 1 || n > modeltrace.MaxChallenges {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request",
+				"挑战次数必须在 1 到 3 之间")
+			return
+		}
+		if err := h.deps.DB.SetProbeChallenges(n); err != nil {
+			writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存失败")
+			return
+		}
+		out["challenges"] = n
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // --- api keys ---
@@ -1239,4 +1267,6 @@ func serveEmbedded(w http.ResponseWriter, r *http.Request, static fs.FS, name st
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
+
+
 

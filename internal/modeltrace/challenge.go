@@ -29,10 +29,23 @@ var environment01 = []struct {
 	{247, "Fill exactly %d positions with integers from the closed interval [1, 355], making a separate immediate choice for every position."},
 }
 
-// Challenges returns the three probes used for attribution.
-func Challenges() []Challenge {
-	out := make([]Challenge, 0, len(environment01))
-	for i, e := range environment01 {
+// MaxChallenges is the number of probes enrolled per environment. Using more
+// than this gains nothing because the bank only has calibration for up to 3.
+const MaxChallenges = 3
+
+// Challenges returns n probes from the enrolled environment, clamped to
+// [1, MaxChallenges]. Fewer probes are faster but less certain: the bank's own
+// cross-validation is 96.3% for one probe, 99.7% for two and 100% for three.
+func Challenges(n int) []Challenge {
+	if n < 1 {
+		n = 1
+	}
+	if n > MaxChallenges {
+		n = MaxChallenges
+	}
+	out := make([]Challenge, 0, n)
+	for i := 0; i < n; i++ {
+		e := environment01[i]
 		out = append(out, Challenge{
 			ID:       fmt.Sprintf("probe-%d", i+1),
 			Expected: e.count,

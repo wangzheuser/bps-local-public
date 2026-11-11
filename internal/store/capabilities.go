@@ -109,10 +109,11 @@ func (d *DB) DeleteAccountModels(accountID string) error {
 	return nil
 }
 
-// GetProbeSchedule reads the interval in minutes and the last run time.
-// Zero interval means scheduled probing is off.
-func (d *DB) GetProbeSchedule() (intervalMinutes int, lastRun int64, err error) {
-	var iv, last string
+// GetProbeSchedule reads the interval in minutes, the last run time and how
+// many challenges each model gets. Zero interval means scheduled probing is
+// off; a zero challenge count falls back to the default of 3.
+func (d *DB) GetProbeSchedule() (intervalMinutes int, lastRun int64, challenges int, err error) {
+	var iv, last, ch string
 	read := func(key string, dst *string) error {
 		e := d.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(dst)
 		if errors.Is(e, sql.ErrNoRows) {
@@ -122,15 +123,25 @@ func (d *DB) GetProbeSchedule() (intervalMinutes int, lastRun int64, err error) 
 		return e
 	}
 	if err := read("probe_interval_minutes", &iv); err != nil {
-		return 0, 0, fmt.Errorf("read probe interval: %w", err)
+		return 0, 0, 0, fmt.Errorf("read probe interval: %w", err)
 	}
 	if err := read("probe_last_run", &last); err != nil {
-		return 0, 0, fmt.Errorf("read probe last run: %w", err)
+		return 0, 0, 0, fmt.Errorf("read probe last run: %w", err)
+	}
+	if err := read("probe_challenges", &ch); err != nil {
+		return 0, 0, 0, fmt.Errorf("read probe challenges: %w", err)
 	}
 	_, _ = fmt.Sscanf(iv, "%d", &intervalMinutes)
 	_, _ = fmt.Sscanf(last, "%d", &lastRun)
-	return intervalMinutes, lastRun, nil
+	_, _ = fmt.Sscanf(ch, "%d", &challenges)
+	if challenges < 1 {
+		challenges = DefaultProbeChallenges
+	}
+	return intervalMinutes, lastRun, challenges, nil
 }
+
+// DefaultProbeChallenges matches the bank's recommended query count.
+const DefaultProbeChallenges = 3
 
 // SetProbeInterval stores the scheduled probing interval in minutes.
 func (d *DB) SetProbeInterval(minutes int) error {
@@ -140,4 +151,9 @@ func (d *DB) SetProbeInterval(minutes int) error {
 // SetProbeLastRun records when a full probe run finished.
 func (d *DB) SetProbeLastRun(unixMilli int64) error {
 	return d.SetSetting("probe_last_run", fmt.Sprintf("%d", unixMilli))
+}
+
+// SetProbeChallenges stores how many challenges each model gets per run.
+func (d *DB) SetProbeChallenges(n int) error {
+	return d.SetSetting("probe_challenges", fmt.Sprintf("%d", n))
 }

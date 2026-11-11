@@ -142,6 +142,14 @@
       <div class="cap-toolbar">
         <button id="detect-cap-btn" class="btn primary">立即检测</button>
         <label class="cap-schedule">
+          <span>挑战次数</span>
+          <select id="cap-challenges">
+            <option value="1">1（快，约 96% 准确）</option>
+            <option value="2">2（约 99.7% 准确）</option>
+            <option value="3">3（慢，约 100% 准确）</option>
+          </select>
+        </label>
+        <label class="cap-schedule">
           <span>定时检测间隔</span>
           <input id="cap-interval" type="number" min="0" max="10080" step="1" />
           <span class="hint">分钟，0 表示关闭</span>

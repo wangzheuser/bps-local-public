@@ -1094,6 +1094,10 @@
       if (document.activeElement !== document.getElementById('cap-interval')) {
         document.getElementById('cap-interval').value = data.interval_minutes || 0;
       }
+      var chSel = document.getElementById('cap-challenges');
+      if (chSel && data.challenges) {
+        chSel.value = String(data.challenges);
+      }
 
       // 进度
       var st = data.status || {};
@@ -1144,14 +1148,25 @@
     var errEl = document.getElementById('cap-error');
     errEl.classList.add('hidden');
     var minutes = parseInt(document.getElementById('cap-interval').value || '0', 10);
+    var challenges = parseInt(document.getElementById('cap-challenges').value || '3', 10);
     if (isNaN(minutes) || minutes < 0 || minutes > 10080) {
       errEl.textContent = '间隔必须是 0 到 10080 之间的整数（分钟）';
       errEl.classList.remove('hidden');
       return;
     }
-    api('/capabilities/schedule', { method: 'PUT', body: { interval_minutes: minutes } })
+    if (isNaN(challenges) || challenges < 1 || challenges > 3) {
+      errEl.textContent = '挑战次数必须在 1 到 3 之间';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    api('/capabilities/schedule', {
+      method: 'PUT',
+      body: { interval_minutes: minutes, challenges: challenges }
+    })
       .then(function () {
-        toast(minutes > 0 ? '定时检测已设为每 ' + minutes + ' 分钟' : '定时检测已关闭');
+        toast(minutes > 0
+          ? '已保存：每 ' + minutes + ' 分钟检测，每次 ' + challenges + ' 轮挑战'
+          : '已保存：定时检测关闭，挑战 ' + challenges + ' 轮');
         loadCapabilities();
       })
       .catch(function (err) {

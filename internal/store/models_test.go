@@ -116,6 +116,99 @@ func TestModelMappingsReplaceAndLookup(t *testing.T) {
 	}
 }
 
+func TestProbeScheduleDefaultsAndPersistence(t *testing.T) {
+	db := openModelsDB(t)
+
+	// A fresh database defaults to 3 challenges with scheduling off.
+	interval, lastRun, challenges, err := db.GetProbeSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interval != 0 || lastRun != 0 {
+		t.Fatalf("defaults = %d, %d", interval, lastRun)
+	}
+	if challenges != DefaultProbeChallenges {
+		t.Fatalf("challenges = %d, want %d", challenges, DefaultProbeChallenges)
+	}
+
+	if err := db.SetProbeInterval(120); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProbeChallenges(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProbeLastRun(1700000000000); err != nil {
+		t.Fatal(err)
+	}
+	interval, lastRun, challenges, err = db.GetProbeSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interval != 120 || lastRun != 1700000000000 || challenges != 1 {
+		t.Fatalf("round trip = %d, %d, %d", interval, lastRun, challenges)
+	}
+}
+
+func TestAccountModelsRoundTrip(t *testing.T) {
+	db := openModelsDB(t)
+
+	rows := []AccountModel{
+		{AccountID: "a", Model: "gpt-5.6-luna", TopModel: "gpt-5.6-luna", SelfProb: 0.99, Verified: true, CheckedAt: 1000},
+		{AccountID: "a", Model: "gpt-5.6-sol", TopModel: "gpt-5.6-luna", SelfProb: 0.0, Verified: false, CheckedAt: 1000},
+		{AccountID: "b", Model: "gpt-5.6-luna", TopModel: "gpt-5.6-luna", SelfProb: 1.0, Verified: true, CheckedAt: 1000},
+	}
+	if err := db.UpsertAccountModels(rows); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.ListAccountModels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("rows = %d", len(got))
+	}
+
+	// Only measured hits count as supported.
+	verified, hasData, err := db.VerifiedAccountsForModel("gpt-5.6-luna")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasData || len(verified) != 2 {
+		t.Fatalf("luna verified = %v, hasData = %v", verified, hasData)
+	}
+	verified, hasData, err = db.VerifiedAccountsForModel("gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasData || len(verified) != 0 {
+		t.Fatalf("sol should have data but no verified: %v, %v", verified, hasData)
+	}
+	// A model never probed reports no data, which routing treats as unconstrained.
+	if _, hasData, _ = db.VerifiedAccountsForModel("gpt-9-unknown"); hasData {
+		t.Fatal("unknown model must report hasData = false")
+	}
+
+	// Re-probing replaces the row rather than duplicating it.
+	if err := db.UpsertAccountModels([]AccountModel{
+		{AccountID: "a", Model: "gpt-5.6-sol", TopModel: "gpt-5.6-sol", SelfProb: 0.97, Verified: true, CheckedAt: 2000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verified, _, _ = db.VerifiedAccountsForModel("gpt-5.6-sol")
+	if len(verified) != 1 || verified[0] != "a" {
+		t.Fatalf("after re-probe verified = %v", verified)
+	}
+
+	// Deleting an account drops its rows.
+	if err := db.DeleteAccountModels("a"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.ListAccountModels()
+	if len(got) != 1 || got[0].AccountID != "b" {
+		t.Fatalf("after delete = %+v", got)
+	}
+}
+
 func TestModelMappingsReplaceIsAtomic(t *testing.T) {
 	db := openModelsDB(t)
 	if err := db.ReplaceModelMappings([]ModelMapping{

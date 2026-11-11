@@ -813,6 +813,76 @@ func TestMappingSaveInvalidatesCache(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesScheduleValidation(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	// The panel reports whether attribution is usable at all.
+	rec := e.request(http.MethodGet, "/admin/api/capabilities", "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capabilities = %d %s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Available   bool `json:"available"`
+		Challenges  int  `json:"challenges"`
+		MaxChallenges int `json:"max_challenges"`
+		Cells       []any `json:"cells"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Challenges != 3 {
+		t.Fatalf("default challenges = %d, want 3", doc.Challenges)
+	}
+	if doc.MaxChallenges != 3 {
+		t.Fatalf("max challenges = %d", doc.MaxChallenges)
+	}
+
+	// In-range values persist.
+	rec = e.request(http.MethodPut, "/admin/api/capabilities/schedule",
+		`{"interval_minutes":30,"challenges":2}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", rec.Code, rec.Body.String())
+	}
+	interval, _, challenges, err := e.db.GetProbeSchedule()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interval != 30 || challenges != 2 {
+		t.Fatalf("stored = %d, %d", interval, challenges)
+	}
+
+	// Out-of-range challenge counts are rejected before touching storage.
+	for _, bad := range []string{"0", "-1", "4", "99"} {
+		body := `{"challenges":` + bad + `}`
+		rec = e.request(http.MethodPut, "/admin/api/capabilities/schedule", body, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("challenges=%s -> %d, want 400", bad, rec.Code)
+		}
+	}
+	if _, _, c, _ := e.db.GetProbeSchedule(); c != 2 {
+		t.Fatalf("rejected saves must not change storage, got %d", c)
+	}
+
+	// Interval bounds are enforced too.
+	rec = e.request(http.MethodPut, "/admin/api/capabilities/schedule",
+		`{"interval_minutes":-5}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative interval -> %d", rec.Code)
+	}
+	rec = e.request(http.MethodPut, "/admin/api/capabilities/schedule",
+		`{"interval_minutes":20000}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized interval -> %d", rec.Code)
+	}
+
+	// An empty body is a client error, not a silent no-op.
+	rec = e.request(http.MethodPut, "/admin/api/capabilities/schedule", `{}`, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty body -> %d, want 400", rec.Code)
+	}
+}
+
 func TestStaticAssets(t *testing.T) {
 	e := newTestEnv(t)
 	e.login()

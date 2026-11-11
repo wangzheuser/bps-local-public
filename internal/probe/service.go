@@ -184,7 +184,7 @@ func (s *Service) probeAccount(ctx context.Context, bank *modeltrace.Bank, a *st
 		s.recordBatch(a.ID, models, "runtime not loaded")
 		return
 	}
-	challenges := modeltrace.Challenges()
+	challenges := modeltrace.Challenges(s.ChallengeCount())
 	for _, model := range models {
 		if ctx.Err() != nil {
 			return
@@ -313,6 +313,19 @@ func runTest(ctx context.Context, rt *gateway.Runtime, model, prompt string) (st
 }
 
 
+// ChallengeCount reports how many probes each model gets, defaulting to the
+// bank's recommended 3 when unset.
+func (s *Service) ChallengeCount() int {
+	_, _, n, err := s.db.GetProbeSchedule()
+	if err != nil || n < 1 {
+		return store.DefaultProbeChallenges
+	}
+	if n > modeltrace.MaxChallenges {
+		return modeltrace.MaxChallenges
+	}
+	return n
+}
+
 // RunScheduler checks the configured interval and starts a probe when one is
 // due. It blocks until ctx is done and is meant to run in its own goroutine.
 func (s *Service) RunScheduler(ctx context.Context) {
@@ -331,7 +344,7 @@ func (s *Service) RunScheduler(ctx context.Context) {
 // maybeStartScheduled starts a run when the interval elapsed and nothing is in
 // progress. Failures land on the status instead of being retried every minute.
 func (s *Service) maybeStartScheduled() {
-	interval, lastRun, err := s.db.GetProbeSchedule()
+	interval, lastRun, _, err := s.db.GetProbeSchedule()
 	if err != nil || interval <= 0 {
 		return
 	}
@@ -348,3 +361,4 @@ func (s *Service) maybeStartScheduled() {
 		s.mu.Unlock()
 	}
 }
+
