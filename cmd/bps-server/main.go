@@ -144,8 +144,12 @@ func main() {
 	// Attribution probing needs the fingerprint bank; without it the console
 	// reports the feature as unavailable and routing stays unconstrained.
 	probeSvc := probe.NewService(db, sched, cfg.BankPath)
-	if resolved, err := modeltrace.ResolveBankPath(cfg.BankPath); err == nil {
-		log.Printf("model attribution probing enabled (bank %s)", resolved)
+	// The bank is embedded, so attribution works without any file or network.
+	if bank, err := modeltrace.Load(); err == nil {
+		log.Printf("model attribution probing enabled (bank %s, built %s)", bank.Source, bank.BuiltAt)
+		if bank.Warning != "" {
+			log.Printf("model attribution warning: %s", bank.Warning)
+		}
 	} else {
 		log.Printf("model attribution probing disabled: %v", err)
 	}

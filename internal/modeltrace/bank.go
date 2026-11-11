@@ -11,6 +11,7 @@
 package modeltrace
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -37,8 +38,13 @@ type Model struct {
 
 // Bank is the loaded fingerprint bank.
 type Bank struct {
-	BuiltAt     string
-	Models      []Model
+	BuiltAt string
+	Models  []Model
+	// Source records where the bank came from: a path, or "embedded".
+	Source string
+	// Warning is set when the configured bank was unusable and a fallback was
+	// used, so the console can surface it.
+	Warning string
 	modelIndex  map[string]int
 	calibration map[int]float64 // query count -> beta
 
@@ -81,28 +87,17 @@ func SetBankPath(path string) {
 	}
 }
 
-// Load reads and validates the fingerprint bank once per path, resolving the
-// path from the configured value or the search locations.
-func Load() (*Bank, error) {
-	bankOnce.Do(func() {
-		resolved, err := ResolveBankPath(bankPath)
-		if err != nil {
-			bankErr = err
-			return
-		}
-		bankCached, bankErr = loadBank(resolved)
-	})
-	return bankCached, bankErr
-}
+//go:embed bank/unified_bank.json
+var embeddedBank []byte
 
-// bankSearchPaths are tried in order when no explicit path is configured, so a
-// container image that ships the bank works with zero setup.
+// bankSearchPaths are checked before the embedded copy so an operator can drop
+// in a newer bank without rebuilding.
 func bankSearchPaths() []string {
 	paths := []string{
-		// Shipped inside the image by the Dockerfile.
-		"/usr/local/share/modeltrace/unified_bank.json",
-		// Alongside the data volume, which operators can mount.
+		// A bank mounted through the data volume.
 		"/data/unified_bank.json",
+		// Shipped alongside the binary by older image layouts.
+		"/usr/local/share/modeltrace/unified_bank.json",
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
@@ -114,36 +109,75 @@ func bankSearchPaths() []string {
 	return paths
 }
 
-// ResolveBankPath returns the first readable bank path. An explicit path wins;
-// otherwise the well-known locations are probed so container deployments need
-// no configuration.
-func ResolveBankPath(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err != nil {
-			return "", fmt.Errorf("modeltrace: configured bank is unreadable: %w", err)
+// Load reads and validates the fingerprint bank.
+//
+// Precedence: the configured path wins when it parses; otherwise the search
+// locations are tried; the embedded copy is the final fallback, so attribution
+// works with no files, no network and no configuration — including inside a
+// container built offline.
+func Load() (*Bank, error) {
+	bankOnce.Do(func() {
+		if bankPath != "" {
+			b, err := loadBankFile(bankPath)
+			if err == nil {
+				bankCached = b
+				return
+			}
+			// An unusable override must not disable the feature entirely; fall
+			// through and record the problem on the bank for the console.
+			fallback := tryFallbacks()
+			if fallback != nil {
+				fallback.Warning = fmt.Sprintf("configured bank %s is unusable (%v); using %s",
+					bankPath, err, fallback.Source)
+				bankCached = fallback
+				return
+			}
+			bankErr = err
+			return
 		}
-		return explicit, nil
-	}
-	tried := make([]string, 0, 4)
-	for _, p := range bankSearchPaths() {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+		if b := tryFallbacks(); b != nil {
+			bankCached = b
+			return
 		}
-		tried = append(tried, p)
-	}
-	return "", fmt.Errorf("modeltrace: no fingerprint bank found (tried %v); "+
-		"set BPS_MODELTRACE_BANK or place unified_bank.json in one of those paths",
-		strings.Join(tried, ", "))
+		bankErr = fmt.Errorf("modeltrace: embedded bank is unusable")
+	})
+	return bankCached, bankErr
 }
 
-func loadBank(path string) (*Bank, error) {
-	if path == "" {
-		return nil, fmt.Errorf("modeltrace: fingerprint bank path is not configured")
+// tryFallbacks returns the first path-provided bank that parses, else the
+// embedded copy, else nil.
+func tryFallbacks() *Bank {
+	for _, p := range bankSearchPaths() {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if b, err := loadBankFile(p); err == nil {
+			return b
+		}
 	}
+	if len(embeddedBank) > 0 {
+		if b, err := parseBank(embeddedBank); err == nil {
+			b.Source = "embedded"
+			return b
+		}
+	}
+	return nil
+}
+
+func loadBankFile(path string) (*Bank, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("modeltrace: read bank: %w", err)
 	}
+	b, err := parseBank(raw)
+	if err != nil {
+		return nil, err
+	}
+	b.Source = path
+	return b, nil
+}
+
+func parseBank(raw []byte) (*Bank, error) {
 	var doc struct {
 		BuiltAt string `json:"built_at"`
 		Models  []struct {
@@ -249,4 +283,5 @@ func (b *Bank) betaFor(queries int) float64 {
 	}
 	return best
 }
+
 

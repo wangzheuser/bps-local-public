@@ -7,22 +7,14 @@ import (
 	"testing"
 )
 
-// bankPathForTest resolves the fingerprint bank from the repo data dir.
-func bankPathForTest(t *testing.T) string {
-	t.Helper()
-	p := filepath.Join("..", "..", "data", "unified_bank.json")
-	if _, err := os.Stat(p); err != nil {
-		t.Skipf("fingerprint bank not present at %s", p)
-	}
-	return p
-}
-
+// loadTestBank returns the embedded bank, so tests run with no external file.
 func loadTestBank(t *testing.T) *Bank {
 	t.Helper()
-	SetBankPath(bankPathForTest(t))
+	// Reset any path a previous test configured.
+	SetBankPath("")
 	b, err := Load()
 	if err != nil {
-		t.Fatalf("load bank: %v", err)
+		t.Fatalf("load embedded bank: %v", err)
 	}
 	return b
 }
@@ -89,3 +81,6 @@ func TestAttributeMatchesReferenceScores(t *testing.T) {
 		}
 	}
 }
+
+
+

@@ -285,16 +285,25 @@ PowerShell 中调用时注意引号层级，推荐用单引号包裹 sqlite 参�
 
 ### 6.5 指纹库与 Docker 部署
 
-归因检测需要 ModelTrace 指纹库（约 900KB，含 18 个模型的统计指纹）。它**不纳入版本控制**，通过以下顺序查找：
+归因检测需要 ModelTrace 指纹库（约 900KB，含 18 个模型的统计指纹）。该库**通过 `go:embed` 编进二进制**，因此构建与运行都不依赖网络或外部文件。
+
+查找顺序（先命中先使用）：
 
 1. `BPS_MODELTRACE_BANK` 环境变量（显式指定）
-2. `/usr/local/share/modeltrace/unified_bank.json`（**Docker 镜像内置**）
-3. `/data/unified_bank.json`（数据卷）
-4. 可执行文件同级目录
+2. `/data/unified_bank.json`（数据卷中放置的更新版本）
+3. 可执行文件同级目录
+4. **二进制内嵌的指纹库**（兜底，始终可用）
 
-**Docker 部署开箱即用**：镜像构建时会下载指纹库并打包，容器启动后无需任何配置即可使用归因检测。构建时可通过 `--build-arg MODELTRACE_BANK_URL=...` 指定镜像源。
+**零依赖部署**：`docker build` 不需要下载任何数据，离线环境可直接构建；容器启动后无需挂载文件或设置环境变量即可使用归因检测。启动日志会显示实际来源，例如：
 
-下载失败不会导致构建失败——只是归因功能不可用，控制台会给出提示，其余功能照常。
+```
+model attribution probing enabled (bank embedded, built 2026-10-09T...)
+model attribution probing enabled (bank /data/unified_bank.json, built ...)
+```
+
+**升级指纹库**：把新的 `unified_bank.json` 放到数据卷的 `/data/` 下并重启即可，无需重新构建镜像。若指定了 `BPS_MODELTRACE_BANK` 却无法解析，服务会自动回退到内嵌库并在日志与总览页给出警告，不会因此禁用功能。
+
+指纹库来源：[xqy2006/ModelTrace](https://github.com/xqy2006/ModelTrace)（MIT）。
 
 **源码运行**需先下载指纹库：
 
@@ -304,3 +313,4 @@ $env:BPS_MODELTRACE_BANK = "$PWD\data\unified_bank.json"
 ```
 
 **测试无 Python 依赖**：`internal/modeltrace/testdata/stress.json` 只保存随机种子（19KB），Go 测试按与参考实现相同的整数算法重建序列，因此 `go test ./...` 在纯净环境（含 CI、容器）中可直接运行。仅在需要重新生成基准时才执行 `scripts/modeltrace_stress.py`。
+
