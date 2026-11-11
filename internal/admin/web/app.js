@@ -851,7 +851,7 @@
     }).catch(function (err) {
       errEl.textContent = err.message;
       errEl.classList.remove('hidden');
-    }).then(loadMappings);
+    }).then(loadMappings).then(loadCapabilities);
   }
 
   function loadMappings() {
@@ -1053,6 +1053,113 @@
       });
   });
 
+  // ---------- 账号模型能力 ----------
+  var capPollTimer = null;
+
+  function loadCapabilities() {
+    var errEl = document.getElementById('cap-error');
+    var statusEl = document.getElementById('cap-status');
+    errEl.classList.add('hidden');
+    api('/capabilities').then(function (data) {
+      var tbody = document.querySelector('#cap-table tbody');
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+
+      if (!data.available) {
+        var reason = data.unavailable_reason || '归因服务未配置';
+        errEl.textContent = '归因检测不可用：' + reason +
+          '。请设置 BPS_MODELTRACE_BANK 指向指纹库文件后重启服务。';
+        errEl.classList.remove('hidden');
+      }
+
+      (data.cells || []).forEach(function (c) {
+        var verdict;
+        if (c.error) {
+          verdict = el('span', { class: 'cap-err', text: '检测失败' });
+        } else if (c.verified) {
+          verdict = el('span', { class: 'cap-ok', text: '真实提供' });
+        } else {
+          verdict = el('span', { class: 'cap-bad', text: '已降级' });
+        }
+        tbody.appendChild(el('tr', null, [
+          el('td', { text: c.account }),
+          el('td', { text: c.model }),
+          el('td', { text: c.error ? '—' : (c.top || '—') }),
+          el('td', { text: c.error ? '—' : (c.self_prob * 100).toFixed(1) + '%' }),
+          el('td', null, [verdict]),
+          el('td', { text: c.checked_at ? fmtTime(c.checked_at) : '—' })
+        ]));
+      });
+
+      // 定时配置
+      if (document.activeElement !== document.getElementById('cap-interval')) {
+        document.getElementById('cap-interval').value = data.interval_minutes || 0;
+      }
+
+      // 进度
+      var st = data.status || {};
+      if (st.running) {
+        statusEl.textContent = '检测中 ' + st.done + ' / ' + st.total +
+          (st.failed ? '（失败 ' + st.failed + '）' : '');
+        scheduleCapPoll();
+      } else if (st.finished_at) {
+        statusEl.textContent = '上次完成：' + fmtTime(st.finished_at) +
+          (st.failed ? '，失败 ' + st.failed + ' 项' : '') +
+          (st.last_error ? '；' + st.last_error : '');
+      } else if (data.last_run) {
+        statusEl.textContent = '上次运行：' + fmtTime(data.last_run);
+      }
+    }).catch(function (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+    });
+  }
+
+  function scheduleCapPoll() {
+    if (capPollTimer) return;
+    capPollTimer = setTimeout(function () {
+      capPollTimer = null;
+      loadCapabilities();
+    }, 3000);
+  }
+
+  document.getElementById('detect-cap-btn').addEventListener('click', function () {
+    var btn = this;
+    var errEl = document.getElementById('cap-error');
+    errEl.classList.add('hidden');
+    btn.disabled = true;
+    btn.textContent = '检测中…';
+    api('/capabilities/detect', { method: 'POST' })
+      .then(function () { toast('检测已启动'); loadCapabilities(); })
+      .catch(function (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+      })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = '立即检测';
+      });
+  });
+
+  document.getElementById('save-interval-btn').addEventListener('click', function () {
+    var errEl = document.getElementById('cap-error');
+    errEl.classList.add('hidden');
+    var minutes = parseInt(document.getElementById('cap-interval').value || '0', 10);
+    if (isNaN(minutes) || minutes < 0 || minutes > 10080) {
+      errEl.textContent = '间隔必须是 0 到 10080 之间的整数（分钟）';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    api('/capabilities/schedule', { method: 'PUT', body: { interval_minutes: minutes } })
+      .then(function () {
+        toast(minutes > 0 ? '定时检测已设为每 ' + minutes + ' 分钟' : '定时检测已关闭');
+        loadCapabilities();
+      })
+      .catch(function (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+      });
+  });
+
   // ---------- 代理设置 ----------
   function renderProxyResult(result, saved) {
     var box = document.getElementById('proxy-result');
@@ -1150,3 +1257,4 @@
     }
   }).catch(function () { showLogin(); });
 })();
+

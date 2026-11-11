@@ -18,6 +18,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
+	"github.com/sunboyzoey/GPT-BPS/internal/probe"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
 )
@@ -41,7 +42,9 @@ type Deps struct {
 	// Models caches model aliases; saving mappings invalidates it so edits take
 	// effect on the next request. Nil disables invalidation.
 	Models *modelmap.Cache
-	Now    func() time.Time
+	// Probe runs model attribution; nil disables the capability panel.
+	Probe *probe.Service
+	Now   func() time.Time
 }
 
 // Handler serves /admin/* including the embedded Web UI.
@@ -94,6 +97,9 @@ func NewHandler(deps Deps, sessions *SessionManager, static fs.FS) *Handler {
 	mux.HandleFunc("POST /admin/api/models/sync", h.requireSession(h.handleSyncModels))
 	mux.HandleFunc("GET /admin/api/models/mappings", h.requireSession(h.handleGetMappings))
 	mux.HandleFunc("PUT /admin/api/models/mappings", h.requireSession(h.handlePutMappings))
+	mux.HandleFunc("GET /admin/api/capabilities", h.requireSession(h.handleGetCapabilities))
+	mux.HandleFunc("POST /admin/api/capabilities/detect", h.requireSession(h.handleDetectCapabilities))
+	mux.HandleFunc("PUT /admin/api/capabilities/schedule", h.requireSession(h.handleScheduleCapabilities))
 
 	mux.HandleFunc("GET /admin/{$}", h.handleIndex)
 	mux.HandleFunc("GET /admin/", h.serveStatic)
@@ -729,6 +735,103 @@ func (h *Handler) handlePutMappings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"mappings": out})
 }
 
+// --- capabilities ---
+
+type capabilityCell struct {
+	Account string  `json:"account"`
+	Model   string  `json:"model"`
+	Top     string  `json:"top"`
+	SelfProb float64 `json:"self_prob"`
+	Verified bool   `json:"verified"`
+	CheckedAt int64 `json:"checked_at"`
+	Error   string  `json:"error,omitempty"`
+}
+
+// handleGetCapabilities returns the measured model/account matrix plus probe
+// scheduling state. When probing is unavailable the payload says why so the
+// console can show setup guidance instead of an empty grid.
+func (h *Handler) handleGetCapabilities(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{"available": false, "cells": []capabilityCell{}}
+	if h.deps.Probe != nil {
+		ok, err := h.deps.Probe.Available()
+		resp["available"] = ok
+		if !ok && err != nil {
+			resp["unavailable_reason"] = err.Error()
+		}
+		resp["status"] = h.deps.Probe.Status()
+	} else {
+		resp["unavailable_reason"] = "attribution service is not configured"
+	}
+
+	rows, err := h.deps.DB.ListAccountModels()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "db_query_failed", "查询失败")
+		return
+	}
+	names := map[string]string{}
+	if accounts, err := h.deps.DB.ListAccounts(); err == nil {
+		for _, a := range accounts {
+			names[a.ID] = a.Name
+		}
+	}
+	cells := make([]capabilityCell, 0, len(rows))
+	for _, row := range rows {
+		name := names[row.AccountID]
+		if name == "" {
+			name = row.AccountID
+		}
+		cells = append(cells, capabilityCell{
+			Account: name, Model: row.Model, Top: row.TopModel,
+			SelfProb: row.SelfProb, Verified: row.Verified,
+			CheckedAt: row.CheckedAt, Error: row.LastError,
+		})
+	}
+	resp["cells"] = cells
+
+	interval, lastRun, err := h.deps.DB.GetProbeSchedule()
+	if err == nil {
+		resp["interval_minutes"] = interval
+		resp["last_run"] = lastRun
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleDetectCapabilities starts a full probe run in the background.
+func (h *Handler) handleDetectCapabilities(w http.ResponseWriter, r *http.Request) {
+	if h.deps.Probe == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "probe_unavailable",
+			"归因检测未配置，请设置 BPS_MODELTRACE_BANK 指向指纹库")
+		return
+	}
+	status, err := h.deps.Probe.Start()
+	if err != nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "probe_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// handleScheduleCapabilities persists the scheduled probing interval.
+func (h *Handler) handleScheduleCapabilities(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IntervalMinutes *int `json:"interval_minutes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || body.IntervalMinutes == nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "请求体无效")
+		return
+	}
+	minutes := *body.IntervalMinutes
+	if minutes < 0 || minutes > 7*24*60 {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "间隔必须在 0 到 10080 分钟之间")
+		return
+	}
+	if err := h.deps.DB.SetProbeInterval(minutes); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "save_failed", "保存失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interval_minutes": minutes})
+}
+
 // --- api keys ---
 
 type apiKeyView struct {
@@ -1136,3 +1239,4 @@ func serveEmbedded(w http.ResponseWriter, r *http.Request, static fs.FS, name st
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
+

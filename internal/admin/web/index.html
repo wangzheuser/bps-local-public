@@ -137,7 +137,25 @@
       <div class="panel">
         <div class="panel-head">
           <div>
-            <h2>模型映射</h2>
+            <h2>账号模型能力</h2>
+      <p class="muted">归因检测会真实请求每个账号的每个模型，判断上游是否按请求的模型推理。检测结果用于路由：请求某个模型时只会分发到被确认真实提供该模型的账号。</p>
+      <div class="cap-toolbar">
+        <button id="detect-cap-btn" class="btn primary">立即检测</button>
+        <label class="cap-schedule">
+          <span>定时检测间隔</span>
+          <input id="cap-interval" type="number" min="0" max="10080" step="1" />
+          <span class="hint">分钟，0 表示关闭</span>
+        </label>
+        <button id="save-interval-btn" class="btn">保存</button>
+        <span id="cap-status" class="muted"></span>
+      </div>
+      <p id="cap-error" class="error hidden"></p>
+      <table id="cap-table" class="table">
+        <thead><tr><th>账号</th><th>模型</th><th>归因为</th><th>自判概率</th><th>结论</th><th>检测时间</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>模型映射</h2>
             <p class="muted">
               请求命中「源模型」时替换为「目标模型」再发给上游，未命中则原样透传。
               源模型支持通配符：<code>*</code> 匹配任意长度（含空），<code>?</code> 匹配单个字符，例如 <code>gpt-6*</code>。

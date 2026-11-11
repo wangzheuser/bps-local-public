@@ -30,6 +30,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
+	"github.com/sunboyzoey/GPT-BPS/internal/probe"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
 )
@@ -48,6 +49,9 @@ type config struct {
 	// PublicBaseURL is the HTTPS origin the upstream can reach to fetch staged
 	// images. Empty disables inline base64 image support.
 	PublicBaseURL string
+	// BankPath locates the ModelTrace fingerprint bank. Empty disables
+	// attribution probing but leaves the server fully functional.
+	BankPath string
 }
 
 var version = "0.1.0-managed-dev"
@@ -114,6 +118,9 @@ func main() {
 	})
 
 	manager := &runtimeManager{sched: sched, db: db, proxy: proxySvc, cfg: runtimeConfig(cfg, proxySvc, relay, modelAliases)}
+	// Routing and body rewriting must agree on the effective model, so the
+	// gateway resolves aliases through the same cache the runtimes use.
+	gw.SetModelMapper(modelAliases.Resolve)
 	svc, err := accounts.NewService(db, filepath.Join(cfg.DataDir, "accounts"), proxySvc.Get, manager, nil)
 	if err != nil {
 		log.Fatalf("accounts: %v", err)
@@ -133,9 +140,23 @@ func main() {
 	}
 
 
+	// Attribution probing needs the fingerprint bank; without it the console
+	// reports the feature as unavailable and routing stays unconstrained.
+	probeSvc := probe.NewService(db, sched, cfg.BankPath)
+	if ok, err := probeSvc.Available(); ok {
+		log.Printf("model attribution probing enabled (bank %s)", cfg.BankPath)
+	} else {
+		log.Printf("model attribution probing disabled: %v", err)
+	}
+	// Restore measured capabilities before serving traffic, so routing honours
+	// the last probe result instead of falling back to "unconstrained".
+	if err := probeSvc.LoadStoredCapabilities(); err != nil {
+		log.Printf("load stored capabilities: %v", err)
+	}
+
 	adminHandler := admin.NewHandler(admin.Deps{
 		DB: db, Scheduler: sched, Accounts: svc, Proxy: proxySvc, Runtime: manager, Sealer: sealer,
-		Images: relay, Models: modelAliases,
+		Images: relay, Models: modelAliases, Probe: probeSvc,
 	}, admin.NewSessionManager(cfg.AdminPassword, cfg.SessionTTL, cfg.CookieSecure), admin.WebFS())
 
 	apiSrv := &http.Server{Addr: cfg.APIAddr, Handler: gw.APIHandler(), ReadHeaderTimeout: 30 * time.Second}
@@ -143,6 +164,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The scheduler honours the console-configured interval; 0 keeps it idle.
+	go probeSvc.RunScheduler(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -342,6 +366,7 @@ func loadConfig() (config, error) {
 		Transport:      env("BPS_UPSTREAM_TRANSPORT", "ws"),
 		CookieSecure:   env("BPS_COOKIE_SECURE", "false") == "true",
 		PublicBaseURL:  strings.TrimSpace(os.Getenv("BPS_PUBLIC_BASE_URL")),
+		BankPath:       strings.TrimSpace(os.Getenv("BPS_MODELTRACE_BANK")),
 	}
 	if cfg.Transport != "ws" && cfg.Transport != "sse" {
 		return cfg, fmt.Errorf("BPS_UPSTREAM_TRANSPORT must be ws or sse, got %q", cfg.Transport)
@@ -403,3 +428,4 @@ func env(key, def string) string {
 	}
 	return def
 }
+

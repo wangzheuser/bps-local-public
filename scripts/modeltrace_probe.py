@@ -24,7 +24,7 @@ import requests
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 BANK_PATH = DATA / "unified_bank.json"
-BASE = "https://bps.codeai.de5.net/admin/api"
+BASE = os.environ.get("BPS_ADMIN_BASE", "http://127.0.0.1:8791/admin/api")
 
 # --- 与 challenge_suite.py 保持一致的 environment-01 ---
 DIRECT = (
@@ -231,4 +231,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

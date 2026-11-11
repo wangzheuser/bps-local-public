@@ -113,6 +113,30 @@ var migrations = []struct {
 			)`,
 		},
 	},
+	{
+		version: 5,
+		stmts: []string{
+			// Which model each account actually serves, as measured by
+			// fingerprint attribution. Routing reads this so a request for a
+			// model an account silently downgrades never lands there.
+			`CREATE TABLE account_models (
+				account_id TEXT NOT NULL,
+				model TEXT NOT NULL,
+				top_model TEXT NOT NULL DEFAULT '',
+				self_prob REAL NOT NULL DEFAULT 0,
+				verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0, 1)),
+				checked_at INTEGER NOT NULL,
+				last_error TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (account_id, model)
+			)`,
+			`CREATE INDEX idx_account_models_model ON account_models(model, verified)`,
+			// Probe scheduling configuration lives with the other settings.
+			`INSERT INTO settings (key, value, updated_at) VALUES
+				('probe_interval_minutes', '0', 0),
+				('probe_last_run', '0', 0)
+				ON CONFLICT(key) DO NOTHING`,
+		},
+	},
 }
 
 // Migrate brings the schema up to the latest version. It fails closed on the

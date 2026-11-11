@@ -118,17 +118,51 @@ func (s *Scheduler) eligible(r *Runtime, now time.Time) bool {
 	return true
 }
 
+// ErrModelUnsupported reports that capability data exists for the model but no
+// eligible account was measured as really serving it. Returning this beats
+// silently routing to an account that would downgrade the request.
+var ErrModelUnsupported = errors.New("model_not_served_by_any_account")
+
 // Pick selects the next account and increments its in-flight counter. The
 // caller must Release when the request finishes.
+//
+// When model is non-empty and some account carries capability data for it, only
+// accounts measured as serving that model are considered. Without capability
+// data the model is unconstrained, so a fresh install keeps working.
 func (s *Scheduler) Pick(sessionID string) (*Runtime, error) {
+	return s.PickForModel(sessionID, "")
+}
+
+// PickForModel is Pick with a model constraint. An empty model means "any".
+func (s *Scheduler) PickForModel(sessionID, model string) (*Runtime, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 
+	// Decide first whether the model is constrained at all.
+	constrained := false
+	if model != "" {
+		for _, r := range s.runtimes {
+			if _, hasData := r.Serves(model); hasData {
+				constrained = true
+				break
+			}
+		}
+	}
+	allowed := func(r *Runtime) bool {
+		if !constrained {
+			return true
+		}
+		serves, hasData := r.Serves(model)
+		// An account with no data for this model is not a safe target once
+		// another account proved it can serve it.
+		return hasData && serves
+	}
+
 	if sessionID != "" {
 		key := s.stickyKey(sessionID)
 		if e, ok := s.sticky[key]; ok && e.expires.After(now) {
-			if r := s.runtimes[e.accountID]; r != nil && s.eligible(r, now) {
+			if r := s.runtimes[e.accountID]; r != nil && s.eligible(r, now) && allowed(r) {
 				r.Active.Add(1)
 				return r, nil
 			}
@@ -140,7 +174,7 @@ func (s *Scheduler) Pick(sessionID string) (*Runtime, error) {
 	var bestOrder int
 	for i, id := range s.order {
 		r := s.runtimes[id]
-		if r == nil || !s.eligible(r, now) {
+		if r == nil || !s.eligible(r, now) || !allowed(r) {
 			continue
 		}
 		score := float64(r.Active.Load()) / float64(maxWeight(r))
@@ -149,16 +183,20 @@ func (s *Scheduler) Pick(sessionID string) (*Runtime, error) {
 		}
 	}
 	if best == nil {
+		if constrained {
+			return nil, ErrModelUnsupported
+		}
 		return nil, ErrNoAccount
 	}
 	// Tie-break deterministically across equal scores using a rotating start
 	// offset so equal-weight idle accounts still alternate.
-	if s.hasEqualScore(s.order, bestScore, now) {
+	if s.hasEqualScoreFiltered(s.order, bestScore, now, allowed) {
 		s.rr++
 		offset := int(s.rr % uint64(len(s.order)))
 		for i := 0; i < len(s.order); i++ {
 			r := s.runtimes[s.order[(i+offset)%len(s.order)]]
-			if r != nil && s.eligible(r, now) && float64(r.Active.Load())/float64(maxWeight(r)) == bestScore {
+			if r != nil && s.eligible(r, now) && allowed(r) &&
+				float64(r.Active.Load())/float64(maxWeight(r)) == bestScore {
 				best = r
 				break
 			}
@@ -183,10 +221,16 @@ func maxWeight(r *Runtime) int {
 }
 
 func (s *Scheduler) hasEqualScore(order []string, score float64, now time.Time) bool {
+	return s.hasEqualScoreFiltered(order, score, now, func(*Runtime) bool { return true })
+}
+
+// hasEqualScoreFiltered is hasEqualScore restricted to accounts the model
+// constraint allows, so tie-breaking cannot drift onto an ineligible account.
+func (s *Scheduler) hasEqualScoreFiltered(order []string, score float64, now time.Time, allowed func(*Runtime) bool) bool {
 	count := 0
 	for _, id := range order {
 		r := s.runtimes[id]
-		if r == nil || !s.eligible(r, now) {
+		if r == nil || !s.eligible(r, now) || !allowed(r) {
 			continue
 		}
 		if float64(r.Active.Load())/float64(maxWeight(r)) == score {

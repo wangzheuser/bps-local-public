@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sunboyzoey/GPT-BPS/internal/apikeys"
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
+	"github.com/sunboyzoey/GPT-BPS/internal/proxy"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
 )
 
@@ -22,6 +24,8 @@ type Gateway struct {
 	sched *Scheduler
 	// images serves staged inline images to the upstream. Nil disables it.
 	images *basispoints.ImageRelay
+	// modelMapper resolves model aliases for routing. Nil disables it.
+	modelMapper proxy.ModelMapper
 	newID  func(prefix string) (string, error)
 	now    func() time.Time
 }
@@ -34,6 +38,11 @@ func NewGateway(db *store.DB, sched *Scheduler) *Gateway {
 // SetImageRelay attaches the inline-image relay. It must be called before
 // serving requests.
 func (g *Gateway) SetImageRelay(relay *basispoints.ImageRelay) { g.images = relay }
+
+// SetModelMapper installs the alias resolver used for routing decisions. The
+// same mapping is applied again inside each account runtime when it builds the
+// upstream body, so both layers agree on the effective model.
+func (g *Gateway) SetModelMapper(m proxy.ModelMapper) { g.modelMapper = m }
 
 // APIHandler assembles the client-facing routes. /healthz is unauthenticated;
 // responses routes require an API key.
@@ -164,7 +173,33 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	sessionID := strings.TrimSpace(r.Header.Get("session_id"))
-	rt, err := g.sched.Pick(sessionID)
+	// Peek at the requested model so routing can avoid accounts that would
+	// silently downgrade it. The body is buffered and replayed, never consumed.
+	requestedModel := ""
+	if body, err := io.ReadAll(io.LimitReader(r.Body, requestBodyLimit)); err == nil {
+		_ = r.Body.Close()
+		requestedModel = modelFromBody(body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	// Apply the configured alias before routing: the alias is what the upstream
+	// will actually receive, so capability matching must use the same name.
+	routeModel := requestedModel
+	if target, err := g.applyModelMapping(routeModel); err == nil && target != "" {
+		routeModel = target
+	}
+
+	rt, err := g.sched.PickForModel(sessionID, routeModel)
+	if errors.Is(err, ErrModelUnsupported) {
+		rec.mu.Lock()
+		rec.httpStatus = http.StatusConflict
+		rec.errorCode = "model_not_served"
+		rec.mu.Unlock()
+		g.finishRequest(rec, nil, r, w)
+		writeAPIError(w, http.StatusConflict, "model_not_served",
+			"no enabled account was measured as really serving "+routeModel+
+				"; run attribution from the admin console or pick another model")
+		return
+	}
 	if err != nil {
 		rec.mu.Lock()
 		rec.httpStatus = http.StatusServiceUnavailable
@@ -180,6 +215,34 @@ func (g *Gateway) handleResponses(w http.ResponseWriter, r *http.Request) {
 	tw := newTrackingWriter(w, rec)
 	rt.Handler.ServeHTTP(tw, r)
 	g.finishRequest(rec, rt, r, w)
+}
+
+// requestBodyLimit bounds how much of an inbound body is buffered for routing.
+// It matches the proxy's own read cap so nothing is silently truncated here.
+const requestBodyLimit = 256 << 20
+
+// modelFromBody extracts only the model field, ignoring prompt content.
+func modelFromBody(raw []byte) string {
+	var doc struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Model)
+}
+
+// applyModelMapping resolves the configured alias, if any. A lookup failure
+// leaves the model untouched: routing must not break on a database hiccup.
+func (g *Gateway) applyModelMapping(model string) (string, error) {
+	if g.modelMapper == nil || model == "" {
+		return "", nil
+	}
+	target, err := g.modelMapper(model)
+	if err != nil || target == "" || target == model {
+		return "", nil
+	}
+	return target, nil
 }
 
 func newIDOrPanic(g *Gateway) string {
@@ -319,3 +382,4 @@ func toNullInt64(p *int64) sql.NullInt64 {
 	}
 	return sql.NullInt64{Valid: true, Int64: *p}
 }
+

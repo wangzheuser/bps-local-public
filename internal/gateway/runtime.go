@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -47,7 +48,14 @@ type Runtime struct {
 	Handler http.Handler
 	// Models reads this account's upstream model catalog.
 	Models func(ctx context.Context) (*proxy.ModelCatalog, error)
-	close  func()
+
+	// Serves tracks which models this account really provides, as measured by
+	// fingerprint attribution. A nil map means "no capability data", which
+	// routing treats as unconstrained rather than unsupported.
+	servesMu sync.RWMutex
+	serves   map[string]bool
+
+	close func()
 
 	Active        atomic.Int64
 	Enabled       atomic.Bool
@@ -99,4 +107,39 @@ func (r *Runtime) CloseIdle() {
 	if r.close != nil {
 		r.close()
 	}
+}
+
+
+// SetServes installs the measured capability set. Passing nil clears it, which
+// makes routing treat this account as unconstrained.
+func (r *Runtime) SetServes(models map[string]bool) {
+	r.servesMu.Lock()
+	defer r.servesMu.Unlock()
+	r.serves = models
+}
+
+// Serves reports whether this account was measured as really providing model.
+// The second result is false when no capability data is installed, letting the
+// scheduler skip the constraint instead of excluding the account.
+func (r *Runtime) Serves(model string) (serves bool, hasData bool) {
+	r.servesMu.RLock()
+	defer r.servesMu.RUnlock()
+	if r.serves == nil {
+		return false, false
+	}
+	return r.serves[model], true
+}
+
+// ServesSnapshot returns a copy of the capability set for the console.
+func (r *Runtime) ServesSnapshot() map[string]bool {
+	r.servesMu.RLock()
+	defer r.servesMu.RUnlock()
+	if r.serves == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(r.serves))
+	for k, v := range r.serves {
+		out[k] = v
+	}
+	return out
 }
