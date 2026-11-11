@@ -282,3 +282,25 @@ PowerShell 中调用时注意引号层级，推荐用单引号包裹 sqlite 参�
 | 3（默认） | 100% | 约 25 分钟 |
 
 在「模型」页的下拉框选择后点「保存」即可。准确率来自指纹库自身的交叉验证（`calibration.*.cv_accuracy`）。次数上限为 3，因为指纹库只对 1–3 条查询做了概率校准。
+
+### 6.5 指纹库与 Docker 部署
+
+归因检测需要 ModelTrace 指纹库（约 900KB，含 18 个模型的统计指纹）。它**不纳入版本控制**，通过以下顺序查找：
+
+1. `BPS_MODELTRACE_BANK` 环境变量（显式指定）
+2. `/usr/local/share/modeltrace/unified_bank.json`（**Docker 镜像内置**）
+3. `/data/unified_bank.json`（数据卷）
+4. 可执行文件同级目录
+
+**Docker 部署开箱即用**：镜像构建时会下载指纹库并打包，容器启动后无需任何配置即可使用归因检测。构建时可通过 `--build-arg MODELTRACE_BANK_URL=...` 指定镜像源。
+
+下载失败不会导致构建失败——只是归因功能不可用，控制台会给出提示，其余功能照常。
+
+**源码运行**需先下载指纹库：
+
+```powershell
+python scripts/fetch-modeltrace-bank.py
+$env:BPS_MODELTRACE_BANK = "$PWD\data\unified_bank.json"
+```
+
+**测试无 Python 依赖**：`internal/modeltrace/testdata/stress.json` 只保存随机种子（19KB），Go 测试按与参考实现相同的整数算法重建序列，因此 `go test ./...` 在纯净环境（含 CI、容器）中可直接运行。仅在需要重新生成基准时才执行 `scripts/modeltrace_stress.py`。

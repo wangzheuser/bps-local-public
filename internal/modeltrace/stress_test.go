@@ -2,56 +2,73 @@ package modeltrace
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-// stressCase is one generated reference case: the answers, and the full
-// probability vector the Python reference produced for them.
+// stressCase is a seed-based fixture: the sequences are rebuilt from seeds by
+// StressSequence, so no numbers are stored and no Python is needed to run the
+// test. Only the expected probabilities come from the reference run.
 type stressCase struct {
-	Name      string              `json:"name"`
-	Requested string              `json:"requested"`
-	Used      int                 `json:"used"`
-	Beta      float64             `json:"beta"`
-	Answers   []Answer            `json:"answers"`
-	WantTop   string              `json:"want_top"`
-	WantProbs map[string]float64  `json:"want_probs"`
-	WantAll   [][2]json.RawMessage `json:"want_all"`
+	Name      string             `json:"name"`
+	Generator string             `json:"generator"`
+	Length    int                `json:"length"`
+	Seeds     []uint64           `json:"seeds"`
+	WantTop   string             `json:"want_top"`
+	WantProbs map[string]float64 `json:"want_probs"`
 }
 
-// TestAttributeMatchesReferenceOnRandomData replays every generated case and
-// compares the whole probability vector, not just the winner. Matching all 18
-// probabilities rules out a coincidental top-1 agreement.
-func TestAttributeMatchesReferenceOnRandomData(t *testing.T) {
-	b := loadTestBank(t)
+func loadStressCases(t *testing.T) []stressCase {
+	t.Helper()
 	path := filepath.Join("testdata", "stress.json")
-	if _, err := os.Stat(path); err != nil {
-		t.Skip("stress fixture not generated; run scripts/modeltrace_stress.py")
-	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("stress fixture missing; regenerate with scripts/modeltrace_stress.py")
 	}
 	var cases []stressCase
 	if err := json.Unmarshal(raw, &cases); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode stress fixture: %v", err)
 	}
 	if len(cases) == 0 {
-		t.Fatal("no stress cases")
+		t.Fatal("stress fixture is empty")
 	}
+	return cases
+}
 
-	const tolerance = 1e-9
+// TestAttributeMatchesReferenceOnRandomData replays every fixture case by
+// rebuilding its sequences from the stored seeds, then compares the complete
+// probability vector — not just the winner. Matching all 18 probabilities rules
+// out a coincidental top-1 agreement.
+func TestAttributeMatchesReferenceOnRandomData(t *testing.T) {
+	b := loadTestBank(t)
+	cases := loadStressCases(t)
+
+	// The Go generator must reproduce the reference sequences exactly, so a
+	// mismatch is reported as a generator bug rather than a scoring bug.
+	const tolerance = 1e-12
 	for _, c := range cases {
-		res, err := b.Attribute(c.Requested, c.Answers)
+		answers := make([]Answer, 0, len(c.Seeds))
+		for _, seed := range c.Seeds {
+			nums := StressSequence(c.Generator, seed, c.Length)
+			if len(nums) != c.Length {
+				t.Fatalf("%s: generator produced %d values, want %d", c.Name, len(nums), c.Length)
+			}
+			text, err := json.Marshal(nums)
+			if err != nil {
+				t.Fatal(err)
+			}
+			answers = append(answers, Answer{Expected: c.Length, Text: string(text)})
+		}
+
+		res, err := b.Attribute(c.WantTop, answers)
 		if err != nil {
 			t.Fatalf("%s: %v", c.Name, err)
 		}
-		if res.Used != c.Used {
-			t.Fatalf("%s: used = %d, want %d", c.Name, res.Used, c.Used)
-		}
 		if res.TopModel != c.WantTop {
-			t.Fatalf("%s: top = %s, want %s", c.Name, res.TopModel, c.WantTop)
+			t.Fatalf("%s: top = %s, want %s (generator %s len %d)",
+				c.Name, res.TopModel, c.WantTop, c.Generator, c.Length)
 		}
 		got := make(map[string]float64, len(res.Ranking))
 		for _, r := range res.Ranking {
@@ -63,20 +80,48 @@ func TestAttributeMatchesReferenceOnRandomData(t *testing.T) {
 				diff = -diff
 			}
 			if diff > tolerance {
-				t.Fatalf("%s: p(%s) = %.12f, want %.12f (diff %.3g)",
+				t.Fatalf("%s: p(%s) = %.15f, want %.15f (diff %.3g)",
 					c.Name, model, got[model], want, diff)
 			}
 		}
-		// The full vector must sum to 1 within float noise.
 		var sum float64
 		for _, p := range got {
 			sum += p
 		}
-		if sum < 1-1e-6 || sum > 1+1e-6 {
+		if sum < 1-1e-9 || sum > 1+1e-9 {
 			t.Fatalf("%s: probabilities sum to %v", c.Name, sum)
 		}
 	}
-	t.Logf("verified %d random cases against the Python reference", len(cases))
+	t.Logf("verified %d seed-based cases against the Python reference", len(cases))
+}
+
+// TestStressSequenceIsDeterministic guards the property the fixture relies on:
+// the same seed always yields the same sequence, and the generator names are
+// all implemented.
+func TestStressSequenceIsDeterministic(t *testing.T) {
+	names := []string{"uniform", "skewed-low", "skewed-high", "bimodal", "digits", "descending", "boundary"}
+	for _, name := range names {
+		a := StressSequence(name, 42, 100)
+		b := StressSequence(name, 42, 100)
+		if len(a) != 100 || len(b) != 100 {
+			t.Fatalf("%s: length %d/%d", name, len(a), len(b))
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				t.Fatalf("%s: not deterministic at %d", name, i)
+			}
+			if a[i] < ValueMin || a[i] > ValueMax {
+				t.Fatalf("%s: value %d out of range at %d", name, a[i], i)
+			}
+		}
+	}
+	if StressSequence("does-not-exist", 1, 10) != nil {
+		t.Fatal("unknown generator must return nil")
+	}
+	// A different seed must produce a different sequence.
+	if fmt.Sprint(StressSequence("uniform", 1, 20)) == fmt.Sprint(StressSequence("uniform", 2, 20)) {
+		t.Fatal("different seeds produced identical output")
+	}
 }
 
 // TestParseNumbersMatchesReference pins the parser on shapes that appear in

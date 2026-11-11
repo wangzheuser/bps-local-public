@@ -30,6 +30,7 @@ import (
 	"github.com/sunboyzoey/GPT-BPS/internal/basispoints"
 	"github.com/sunboyzoey/GPT-BPS/internal/modelmap"
 	"github.com/sunboyzoey/GPT-BPS/internal/gateway"
+	"github.com/sunboyzoey/GPT-BPS/internal/modeltrace"
 	"github.com/sunboyzoey/GPT-BPS/internal/probe"
 	"github.com/sunboyzoey/GPT-BPS/internal/proxysettings"
 	"github.com/sunboyzoey/GPT-BPS/internal/store"
@@ -143,8 +144,8 @@ func main() {
 	// Attribution probing needs the fingerprint bank; without it the console
 	// reports the feature as unavailable and routing stays unconstrained.
 	probeSvc := probe.NewService(db, sched, cfg.BankPath)
-	if ok, err := probeSvc.Available(); ok {
-		log.Printf("model attribution probing enabled (bank %s)", cfg.BankPath)
+	if resolved, err := modeltrace.ResolveBankPath(cfg.BankPath); err == nil {
+		log.Printf("model attribution probing enabled (bank %s)", resolved)
 	} else {
 		log.Printf("model attribution probing disabled: %v", err)
 	}
@@ -428,4 +429,5 @@ func env(key, def string) string {
 	}
 	return def
 }
+
 

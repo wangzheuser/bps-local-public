@@ -21,6 +21,10 @@ services:
       # Public HTTPS origin the upstream uses to fetch staged inline images.
       # Empty disables inline base64 image support.
       BPS_PUBLIC_BASE_URL: ${BPS_PUBLIC_BASE_URL:-}
+      # The image ships the fingerprint bank at /usr/local/share/modeltrace,
+      # which the loader finds automatically. Set this only to override it with
+      # a newer bank, e.g. /data/unified_bank.json from a mounted volume.
+      BPS_MODELTRACE_BANK: ${BPS_MODELTRACE_BANK:-}
       BPS_USAGE_RETENTION_DAYS: ${BPS_USAGE_RETENTION_DAYS:-30}
     secrets:
       - admin_password

@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -69,20 +71,69 @@ var (
 	bankPath   string
 )
 
-// SetBankPath points the loader at a bank file. It must be called before Load.
+// SetBankPath points the loader at a bank file. An empty value falls back to the
+// well-known locations, so container images need no configuration.
 func SetBankPath(path string) {
+	path = strings.TrimSpace(path)
 	if path != bankPath {
 		bankPath = path
 		bankOnce = sync.Once{}
 	}
 }
 
-// Load reads and validates the fingerprint bank once per path.
+// Load reads and validates the fingerprint bank once per path, resolving the
+// path from the configured value or the search locations.
 func Load() (*Bank, error) {
 	bankOnce.Do(func() {
-		bankCached, bankErr = loadBank(bankPath)
+		resolved, err := ResolveBankPath(bankPath)
+		if err != nil {
+			bankErr = err
+			return
+		}
+		bankCached, bankErr = loadBank(resolved)
 	})
 	return bankCached, bankErr
+}
+
+// bankSearchPaths are tried in order when no explicit path is configured, so a
+// container image that ships the bank works with zero setup.
+func bankSearchPaths() []string {
+	paths := []string{
+		// Shipped inside the image by the Dockerfile.
+		"/usr/local/share/modeltrace/unified_bank.json",
+		// Alongside the data volume, which operators can mount.
+		"/data/unified_bank.json",
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		paths = append(paths,
+			filepath.Join(dir, "unified_bank.json"),
+			filepath.Join(dir, "..", "share", "modeltrace", "unified_bank.json"),
+		)
+	}
+	return paths
+}
+
+// ResolveBankPath returns the first readable bank path. An explicit path wins;
+// otherwise the well-known locations are probed so container deployments need
+// no configuration.
+func ResolveBankPath(explicit string) (string, error) {
+	if explicit != "" {
+		if _, err := os.Stat(explicit); err != nil {
+			return "", fmt.Errorf("modeltrace: configured bank is unreadable: %w", err)
+		}
+		return explicit, nil
+	}
+	tried := make([]string, 0, 4)
+	for _, p := range bankSearchPaths() {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+		tried = append(tried, p)
+	}
+	return "", fmt.Errorf("modeltrace: no fingerprint bank found (tried %v); "+
+		"set BPS_MODELTRACE_BANK or place unified_bank.json in one of those paths",
+		strings.Join(tried, ", "))
 }
 
 func loadBank(path string) (*Bank, error) {
@@ -198,3 +249,4 @@ func (b *Bank) betaFor(queries int) float64 {
 	}
 	return best
 }
+
