@@ -271,3 +271,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 20px; }
 /* 检测中的行用浅色提示，避免与已完成的混淆 */
 #cap-table tbody tr.cap-pending td { color: #93a1b3; }
 
+/* 单独检测列：按钮不换行，列宽保持稳定 */
+.cap-actions { white-space: nowrap; }
+.cap-detect-one { min-width: 64px; }
+

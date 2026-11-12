@@ -883,6 +883,19 @@ func TestCapabilitiesScheduleValidation(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesDetectOneValidation(t *testing.T) {
+	e := newTestEnv(t)
+	e.login()
+
+	// Without a probe service the endpoint must say so instead of pretending to
+	// measure anything.
+	rec := e.request(http.MethodPost, "/admin/api/capabilities/detect-one",
+		`{"account":"a","model":"gpt-5.6-sol"}`, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no probe service -> %d, want 503", rec.Code)
+	}
+}
+
 func TestStaticAssets(t *testing.T) {
 	e := newTestEnv(t)
 	e.login()

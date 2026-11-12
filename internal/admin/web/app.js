@@ -1072,38 +1072,7 @@
       }
 
       (data.cells || []).forEach(function (c) {
-        var verdict;
-        var isRunning = !!(data.status && data.status.running);
-        if (c.error) {
-          // A failed probe says nothing about the model, so it must not look
-          // like a downgrade. Detect the upstream-overload wording and show it
-          // as "waiting to retry" rather than a hard failure.
-          var transient = /upstream|overload|timeout|502|503/i.test(c.error);
-          verdict = el('span', {
-            class: 'cap-badge err',
-            text: transient ? '待复测' : '未测出',
-            title: c.error
-          });
-        } else if (c.verified) {
-          verdict = el('span', { class: 'cap-badge ok', text: '真实提供' });
-        } else {
-          verdict = el('span', {
-            class: 'cap-badge bad',
-            text: '已降级',
-            title: '归因为 ' + (c.top || '未知')
-          });
-        }
-        var row = el('tr', null, [
-          el('td', { text: c.account }),
-          el('td', { text: c.model }),
-          el('td', { text: c.error ? '—' : (c.top || '—') }),
-          el('td', { text: c.error ? '—' : (c.self_prob * 100).toFixed(1) + '%' }),
-          el('td', null, [verdict]),
-          el('td', { class: 'cap-time', text: c.checked_at ? fmtTime(c.checked_at) : '—' })
-        ]);
-        // Rows being re-measured are dimmed while a run is in progress.
-        if (isRunning) row.classList.add('cap-pending');
-        tbody.appendChild(row);
+        tbody.appendChild(buildCapRow(c, !!(data.status && data.status.running)));
       });
 
       // 定时配置
@@ -1127,6 +1096,79 @@
       errEl.classList.remove('hidden');
     });
   }
+
+  // buildCapRow renders one account/model row plus its single-cell probe
+  // button. The button only locks itself: a per-row probe must not disable the
+  // other rows, which is why the table is not reloaded as a whole.
+  function buildCapRow(c, dimmed) {
+    var verdict;
+    if (c.error) {
+      // A failed probe says nothing about the model, so it must not look
+      // like a downgrade. Detect the upstream-overload wording and show it
+      // as "waiting to retry" rather than a hard failure.
+      var transient = /upstream|overload|timeout|502|503/i.test(c.error);
+      verdict = el('span', {
+        class: 'cap-badge err',
+        text: transient ? '待复测' : '未测出',
+        title: c.error
+      });
+    } else if (c.verified) {
+      verdict = el('span', { class: 'cap-badge ok', text: '真实提供' });
+    } else {
+      verdict = el('span', {
+        class: 'cap-badge bad',
+        text: '已降级',
+        title: '归因为 ' + (c.top || '未知')
+      });
+    }
+
+    var btn = el('button', { class: 'btn btn-mini cap-detect-one', text: '检测' });
+    btn.addEventListener('click', function () { detectOne(c, btn); });
+
+    var row = el('tr', null, [
+      el('td', { text: c.account }),
+      el('td', { text: c.model }),
+      el('td', { text: c.error ? '—' : (c.top || '—') }),
+      el('td', { text: c.error ? '—' : (c.self_prob * 100).toFixed(1) + '%' }),
+      el('td', null, [verdict]),
+      el('td', { class: 'cap-time', text: c.checked_at ? fmtTime(c.checked_at) : '—' }),
+      el('td', { class: 'cap-actions' }, [btn])
+    ]);
+    // Rows being re-measured are dimmed while a run is in progress.
+    if (dimmed) row.classList.add('cap-pending');
+    return row;
+  }
+
+  // detectOne re-measures a single account/model pair. The button stays disabled
+  // for the whole request, and only this row is redrawn from the result.
+  function detectOne(c, btn) {
+    if (btn.disabled) return;
+    var errEl = document.getElementById('cap-error');
+    errEl.classList.add('hidden');
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '检测中…';
+    api('/capabilities/detect-one', {
+      method: 'POST',
+      body: { account: c.account, model: c.model }
+    })
+      .then(function (cell) {
+        // Keep the account name from the row: the endpoint answers with the id.
+        cell.account = c.account;
+        var fresh = buildCapRow(cell, false);
+        var row = btn.closest('tr');
+        if (row && row.parentNode) row.parentNode.replaceChild(fresh, row);
+        toast(c.model + ' @ ' + c.account + '：' +
+          (cell.error ? '检测失败' : (cell.verified ? '真实提供' : '已降级')));
+      })
+      .catch(function (err) {
+        errEl.textContent = c.account + ' / ' + c.model + ' 检测失败：' + err.message;
+        errEl.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = label;
+      });
+  }
+
 
   // renderCapProgress draws the progress bar and the status line.
   function renderCapProgress(st, lastRun) {

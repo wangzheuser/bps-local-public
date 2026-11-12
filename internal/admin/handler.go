@@ -100,6 +100,7 @@ func NewHandler(deps Deps, sessions *SessionManager, static fs.FS) *Handler {
 	mux.HandleFunc("PUT /admin/api/models/mappings", h.requireSession(h.handlePutMappings))
 	mux.HandleFunc("GET /admin/api/capabilities", h.requireSession(h.handleGetCapabilities))
 	mux.HandleFunc("POST /admin/api/capabilities/detect", h.requireSession(h.handleDetectCapabilities))
+	mux.HandleFunc("POST /admin/api/capabilities/detect-one", h.requireSession(h.handleDetectOneCapability))
 	mux.HandleFunc("PUT /admin/api/capabilities/schedule", h.requireSession(h.handleScheduleCapabilities))
 
 	mux.HandleFunc("GET /admin/{$}", h.handleIndex)
@@ -556,7 +557,13 @@ func (h *Handler) handleAccountTest(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := rt.Generate(ctx, model, prompt, strings.TrimSpace(body.Effort))
 	if err != nil {
-		writeAdminError(w, http.StatusBadGateway, "test_failed", err.Error())
+		// Include the upstream's own terminal event so an operator can see the
+		// real code and message instead of only "upstream reported error".
+		detail := err.Error()
+		if res != nil && res.RawTerminal != "" {
+			detail += " | upstream terminal event: " + res.RawTerminal
+		}
+		writeAdminError(w, http.StatusBadGateway, "test_failed", detail)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -812,6 +819,69 @@ func (h *Handler) handleDetectCapabilities(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+// handleDetectOneCapability re-measures a single account/model pair. The request
+// is synchronous because one pair takes tens of seconds, which the console shows
+// as a disabled per-row button rather than as a background run.
+func (h *Handler) handleDetectOneCapability(w http.ResponseWriter, r *http.Request) {
+	if h.deps.Probe == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "probe_unavailable",
+			"归因检测未配置，请设置 BPS_MODELTRACE_BANK 指向指纹库")
+		return
+	}
+	var body struct {
+		AccountID string `json:"account_id"`
+		Account   string `json:"account"`
+		Model     string `json:"model"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "请求体无效")
+		return
+	}
+	accountID := strings.TrimSpace(body.AccountID)
+	// The console knows the account name, not its id, so accept either.
+	if accountID == "" {
+		name := strings.TrimSpace(body.Account)
+		if name == "" {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", "请指定账号")
+			return
+		}
+		accounts, err := h.deps.DB.ListAccounts()
+		if err != nil {
+			writeAdminError(w, http.StatusInternalServerError, "db_query_failed", "查询失败")
+			return
+		}
+		for _, a := range accounts {
+			if a.Name == name {
+				accountID = a.ID
+				break
+			}
+		}
+		if accountID == "" {
+			writeAdminError(w, http.StatusNotFound, "not_found", "账号不存在")
+			return
+		}
+	}
+	model := strings.TrimSpace(body.Model)
+	if model == "" {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "请指定模型")
+		return
+	}
+
+	// Bound the probe: one pair with retries can legitimately run a few minutes.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	row, err := h.deps.Probe.ProbeOne(ctx, accountID, model)
+	if err != nil {
+		writeAdminError(w, http.StatusBadGateway, "probe_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, capabilityCell{
+		Account: accountID, Model: row.Model, Top: row.TopModel,
+		SelfProb: row.SelfProb, Verified: row.Verified,
+		CheckedAt: row.CheckedAt, Error: row.LastError,
+	})
 }
 
 // handleScheduleCapabilities persists the scheduled probing interval and how

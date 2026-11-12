@@ -42,6 +42,9 @@ type Service struct {
 	mu     sync.Mutex
 	status Status
 	cancel context.CancelFunc
+	// singles tracks account/model pairs owned by a single-cell probe so a
+	// concurrent full run skips them instead of measuring twice.
+	singles map[singleKey]bool
 }
 
 // NewService builds the probe service. An empty bankPath or a missing bank
@@ -199,6 +202,102 @@ func (s *Service) finish(err error) {
 	}
 }
 
+// ProbeOne measures a single account/model pair synchronously and returns the
+// stored row. It exists so the console can re-check one cell without waiting for
+// a full run, which can take many minutes.
+//
+// A full run holds the same per-account serialisation guarantee; a single probe
+// takes the run mutex only long enough to reserve the pair, so a concurrent full
+// run cannot measure the same account twice at once.
+func (s *Service) ProbeOne(ctx context.Context, accountID, model string) (store.AccountModel, error) {
+	accountID = strings.TrimSpace(accountID)
+	model = strings.TrimSpace(model)
+	if accountID == "" || model == "" {
+		return store.AccountModel{}, fmt.Errorf("probe: account and model are required")
+	}
+	bank, err := modeltrace.Load()
+	if err != nil {
+		return store.AccountModel{}, err
+	}
+	acc, err := s.db.GetAccount(accountID)
+	if err != nil {
+		return store.AccountModel{}, fmt.Errorf("probe: account not found: %w", err)
+	}
+	rt := s.sched.Get(accountID)
+	if rt == nil {
+		return store.AccountModel{}, fmt.Errorf("probe: account runtime is not loaded")
+	}
+
+	if err := s.beginSingle(accountID, model); err != nil {
+		return store.AccountModel{}, err
+	}
+	defer s.endSingle(accountID, model)
+
+	row := s.probePair(ctx, bank, acc, rt, model)
+	return row, nil
+}
+
+// singleKey identifies one reserved account/model pair.
+type singleKey struct{ account, model string }
+
+// beginSingle reserves a pair so a scheduled run skips it, and rejects a second
+// concurrent probe of the same pair.
+func (s *Service) beginSingle(accountID, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.singles == nil {
+		s.singles = make(map[singleKey]bool)
+	}
+	k := singleKey{accountID, model}
+	if s.singles[k] {
+		return fmt.Errorf("probe: this account/model is already being probed")
+	}
+	s.singles[k] = true
+	return nil
+}
+
+func (s *Service) endSingle(accountID, model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.singles, singleKey{accountID, model})
+}
+
+// probePair runs every challenge for one account/model pair, attributes the
+// answers and persists the row. The caller owns any run accounting.
+func (s *Service) probePair(ctx context.Context, bank *modeltrace.Bank, a *store.Account, rt *gateway.Runtime, model string) store.AccountModel {
+	challenges := modeltrace.Challenges(s.ChallengeCount())
+	answers := make([]modeltrace.Answer, 0, len(challenges))
+	var genErr string
+	for _, ch := range challenges {
+		if ctx.Err() != nil {
+			genErr = ctx.Err().Error()
+			break
+		}
+		text, err := runTestWithRetry(ctx, rt, model, ch.Prompt, probeAttempts)
+		if err != nil {
+			genErr = err.Error()
+			break
+		}
+		answers = append(answers, modeltrace.Answer{Expected: ch.Expected, Text: text})
+	}
+	row := store.AccountModel{AccountID: a.ID, Model: model, CheckedAt: s.now().UnixMilli()}
+	if genErr != "" {
+		row.LastError = genErr
+	} else if res, err := bank.Attribute(model, answers); err != nil {
+		row.LastError = err.Error()
+	} else {
+		row.TopModel = res.TopModel
+		row.SelfProb = res.SelfProb
+		row.Verified = res.Match
+	}
+	if err := s.db.UpsertAccountModels([]store.AccountModel{row}); err != nil {
+		row.LastError = err.Error()
+	}
+	// Publish immediately so routing reflects the measurement.
+	s.publishAccount(a.ID)
+	return row
+}
+
 // probeAccount runs every challenge for every model of one account.
 func (s *Service) probeAccount(ctx context.Context, bank *modeltrace.Bank, a *store.Account, models []string) {
 	rt := s.sched.Get(a.ID)
@@ -206,42 +305,23 @@ func (s *Service) probeAccount(ctx context.Context, bank *modeltrace.Bank, a *st
 		s.recordBatch(a.ID, models, "runtime not loaded")
 		return
 	}
-	challenges := modeltrace.Challenges(s.ChallengeCount())
 	for _, model := range models {
 		if ctx.Err() != nil {
 			return
 		}
-		answers := make([]modeltrace.Answer, 0, len(challenges))
-		var genErr string
-		for _, ch := range challenges {
-			if ctx.Err() != nil {
-				return
-			}
-			text, err := runTestWithRetry(ctx, rt, model, ch.Prompt, probeAttempts)
-			if err != nil {
-				genErr = err.Error()
-				break
-			}
-			answers = append(answers, modeltrace.Answer{Expected: ch.Expected, Text: text})
+		if s.reserved(a.ID, model) {
+			continue
 		}
-		row := store.AccountModel{AccountID: a.ID, Model: model, CheckedAt: s.now().UnixMilli()}
-		if genErr != "" {
-			row.LastError = genErr
-		} else if res, err := bank.Attribute(model, answers); err != nil {
-			row.LastError = err.Error()
-		} else {
-			row.TopModel = res.TopModel
-			row.SelfProb = res.SelfProb
-			row.Verified = res.Match
-		}
-		if err := s.db.UpsertAccountModels([]store.AccountModel{row}); err != nil {
-			row.LastError = err.Error()
-		}
-		// Publish immediately so routing reflects each measurement without
-		// waiting for the whole run, which can take many minutes.
-		s.publishAccount(a.ID)
+		row := s.probePair(ctx, bank, a, rt, model)
 		s.bump(row.LastError != "")
 	}
+}
+
+// reserved reports whether a single-cell probe currently owns this pair.
+func (s *Service) reserved(accountID, model string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.singles[singleKey{accountID, model}]
 }
 
 // publishAccount reloads this account's capability set into its live runtime.

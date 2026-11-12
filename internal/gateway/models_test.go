@@ -80,4 +80,61 @@ func TestRuntimeGenerateReportsFailure(t *testing.T) {
 	}
 }
 
+// A response.failed event carries the upstream's own code, message and backoff
+// hint. Losing them leaves an operator with "upstream reported error" and no way
+// to tell overload from an auth problem.
+func TestRuntimeGenerateSurfacesUpstreamErrorDetail(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`event: response.failed` + "\n" +
+				`data: {"type":"response.failed","response":{"status":"failed",` +
+				`"error":{"type":"service_unavailable_error","code":"server_is_overloaded",` +
+				`"message":"Our servers are currently overloaded. Please try again later.",` +
+				`"param":null,"headers":{"retry-after":"6","retry-after-ms":"6000"}}}}` + "\n\n"))
+	}))
+	defer up.Close()
+	_, sched, _ := buildTestGateway(t, up.URL, "")
+
+	_, err := sched.Get("acct_A").Generate(context.Background(), "m", "hi", "")
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	msg := err.Error()
+	for _, want := range []string{"server_is_overloaded", "overloaded", "retry-after 6s"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+}
+
+// The bridge relays the upstream's overload signal as a bare "error" event with
+// the error object at the top level (not nested under response). This is the
+// shape observed against production, and the one that used to lose its detail.
+func TestRuntimeGenerateSurfacesTopLevelErrorEvent(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			`event: error` + "\n" +
+				`data: {"error":{"code":"server_is_overloaded","headers":{"retry-after":"7",` +
+				`"retry-after-ms":"7000","x-retry-metadata":"NO_MORE_RETRY"},` +
+				`"message":"Our servers are currently overloaded. Please try again later.",` +
+				`"param":null,"type":"service_unavailable_error"},` +
+				`"response_id":"resp_x","sequence_number":2,"type":"error"}` + "\n\n"))
+	}))
+	defer up.Close()
+	_, sched, _ := buildTestGateway(t, up.URL, "")
+
+	_, err := sched.Get("acct_A").Generate(context.Background(), "m", "hi", "")
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	msg := err.Error()
+	for _, want := range []string{"server_is_overloaded", "retry-after 7s"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+}
+
 
